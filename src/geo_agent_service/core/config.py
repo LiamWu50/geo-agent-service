@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     auth_token_secret: str = "change-me-in-production"
     auth_token_expire_minutes: int = 1440
     auth_storage_root: str = "data/auth"
+    layer_tree_storage_root: str = "data/layer-trees"
 
 
 settings = Settings()

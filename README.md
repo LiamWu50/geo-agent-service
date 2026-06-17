@@ -52,3 +52,21 @@ AUTH_STORAGE_ROOT="data/auth"
 ```
 
 接口对接文档见 [docs/auth-api.md](docs/auth-api.md)。
+
+## 用户图层树
+
+提供当前登录用户私有地图图层树能力：
+
+- `GET /api/layer-tree`：获取当前用户图层树；首次调用返回默认树
+- `POST /api/layer-tree/dataset-layers`：把数据中心数据集加入用户图层
+- `PATCH /api/layer-tree/nodes/{nodeId}`：更新用户图层节点名称、显隐、透明度
+- `POST /api/layer-tree/nodes/{nodeId}/move`：移动用户图层节点
+- `DELETE /api/layer-tree/nodes/{nodeId}`：删除用户图层节点
+
+相关环境变量：
+
+```bash
+LAYER_TREE_STORAGE_ROOT="data/layer-trees"
+```
+
+接口对接文档见 [docs/layer-tree-api.md](docs/layer-tree-api.md)。
