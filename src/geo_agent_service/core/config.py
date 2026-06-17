@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     api_prefix: str = "/api"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/ai_webgis"
     gis_storage_root: str = "data/gis"
+    auth_username: str = "admin"
+    auth_password: str = "admin"
+    auth_token_secret: str = "change-me-in-production"
+    auth_token_expire_minutes: int = 1440
+    auth_storage_root: str = "data/auth"
 
 
 settings = Settings()
