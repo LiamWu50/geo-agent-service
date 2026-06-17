@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_prefix: str = "/api"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/ai_webgis"
+    gis_storage_root: str = "data/gis"
 
 
 settings = Settings()
