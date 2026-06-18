@@ -70,3 +70,23 @@ LAYER_TREE_STORAGE_ROOT="data/layer-trees"
 ```
 
 接口对接文档见 [docs/layer-tree-api.md](docs/layer-tree-api.md)。
+
+## AI 聊天
+
+提供登录保护的会话式 AI 聊天流式接口：
+
+- `POST /api/ai-chat/sessions/{sessionId}/messages`：发送用户消息并以 `text/event-stream` 返回工具调用和助手消息事件
+- `GET /api/ai-chat/sessions/{sessionId}`：获取当前用户的会话详情
+
+相关环境变量：
+
+```bash
+AI_CHAT_STORAGE_ROOT="data/ai-chat"
+QWEN_API_KEY=""
+QWEN_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_MODEL_NAME="qwen-plus"
+QWEN_TIMEOUT_SECONDS=60
+QWEN_MAX_OUTPUT_TOKENS=2048
+```
+
+接口对接文档见 [docs/ai-chat-api.md](docs/ai-chat-api.md)。

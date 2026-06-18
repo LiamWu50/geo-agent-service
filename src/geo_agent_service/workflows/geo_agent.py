@@ -1,3 +1,6 @@
+from typing import Any
+
+from langgraph.graph import END, StateGraph
 from pydantic import BaseModel, Field
 
 from geo_agent_service.schemas.agent import (
@@ -27,6 +30,24 @@ class GeoAgentState(BaseModel):
     errors: list[AgentError] = Field(default_factory=list)
 
 
-def create_geo_agent_graph() -> None:
-    """Create the LangGraph workflow once concrete nodes are implemented."""
-    return None
+def create_geo_agent_graph() -> Any:
+    """Create the minimal Geo Agent graph used by the chat orchestration layer."""
+    graph = StateGraph(GeoAgentState)
+
+    async def load_context(state: GeoAgentState) -> GeoAgentState:
+        return state
+
+    async def run_tools(state: GeoAgentState) -> GeoAgentState:
+        return state
+
+    async def generate_response(state: GeoAgentState) -> GeoAgentState:
+        return state
+
+    graph.add_node("load_context", load_context)
+    graph.add_node("run_tools", run_tools)
+    graph.add_node("generate_response", generate_response)
+    graph.set_entry_point("load_context")
+    graph.add_edge("load_context", "run_tools")
+    graph.add_edge("run_tools", "generate_response")
+    graph.add_edge("generate_response", END)
+    return graph.compile()

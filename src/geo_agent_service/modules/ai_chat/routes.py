@@ -1,0 +1,82 @@
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+
+from geo_agent_service.core.config import settings
+from geo_agent_service.modules.ai_chat.model_client import QwenPlusClient
+from geo_agent_service.modules.ai_chat.repository import AiChatRepository
+from geo_agent_service.modules.ai_chat.schemas import ChatMessageRequest, ChatSessionResponse
+from geo_agent_service.modules.ai_chat.service import AiChatService
+from geo_agent_service.modules.auth.routes import (
+    AuthServiceDependency,
+    BearerTokenDependency,
+    unauthorized_error,
+)
+from geo_agent_service.modules.auth.service import InvalidTokenError
+from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.storage import GisDataStorage
+from geo_agent_service.tools.registry import GisToolRegistry
+
+router = APIRouter(prefix="/ai-chat", tags=["ai-chat"])
+
+
+def current_user_id(token: BearerTokenDependency, auth_service: AuthServiceDependency) -> str:
+    try:
+        return auth_service.get_current_user(token).id
+    except InvalidTokenError as exc:
+        raise unauthorized_error() from exc
+
+
+CurrentUserIdDependency = Annotated[str, Depends(current_user_id)]
+
+
+def get_tool_registry() -> GisToolRegistry:
+    return GisToolRegistry()
+
+
+ToolRegistryDependency = Annotated[GisToolRegistry, Depends(get_tool_registry)]
+
+
+def get_ai_chat_service(tool_registry: ToolRegistryDependency) -> AiChatService:
+    gis_storage = GisDataStorage(settings.gis_storage_root)
+    return AiChatService(
+        repository=AiChatRepository(settings.ai_chat_storage_root),
+        dataset_repository=DatasetRepository(gis_storage.metadata_path()),
+        tool_registry=tool_registry,
+        model_client=QwenPlusClient(
+            api_key=settings.qwen_api_key,
+            base_url=settings.qwen_base_url,
+            model_name=settings.qwen_model_name,
+            timeout_seconds=settings.qwen_timeout_seconds,
+            max_output_tokens=settings.qwen_max_output_tokens,
+        ),
+    )
+
+
+AiChatServiceDependency = Annotated[AiChatService, Depends(get_ai_chat_service)]
+
+
+@router.post("/sessions/{session_id}/messages")
+async def stream_chat_message(
+    session_id: str,
+    payload: ChatMessageRequest,
+    user_id: CurrentUserIdDependency,
+    service: AiChatServiceDependency,
+) -> StreamingResponse:
+    return StreamingResponse(
+        service.stream_message(user_id=user_id, session_id=session_id, payload=payload),
+        media_type="text/event-stream",
+    )
+
+
+@router.get("/sessions/{session_id}", response_model=ChatSessionResponse)
+async def get_chat_session(
+    session_id: str,
+    user_id: CurrentUserIdDependency,
+    service: AiChatServiceDependency,
+) -> ChatSessionResponse:
+    session = service.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found.")
+    return ChatSessionResponse(session=session)
