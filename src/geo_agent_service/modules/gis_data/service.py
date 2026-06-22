@@ -11,6 +11,11 @@ from fastapi import UploadFile
 from pandas.api import types as pandas_types  # type: ignore[import-untyped]
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.sample_datasets import (
+    SAMPLE_DATASET_BY_ID,
+    SAMPLE_DATASETS,
+    SampleDatasetDefinition,
+)
 from geo_agent_service.modules.gis_data.schemas import (
     DatasetPreviewResponse,
     DatasetRecord,
@@ -30,7 +35,7 @@ GeometryType = Literal[
     "Raster",
 ]
 FieldType = Literal["string", "number", "boolean", "date", "unknown"]
-DatasetSourceType = Literal["upload", "url"]
+DatasetSourceType = Literal["upload", "url", "sample"]
 MAX_URL_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -88,20 +93,53 @@ class GisDatasetService:
         )
 
     def list_datasets(self) -> list[InputDataSummary]:
-        return [record.summary for record in self.repository.list()]
+        sample_ids = {sample.dataset_id for sample in SAMPLE_DATASETS}
+        user_datasets = [
+            record.summary
+            for record in self.repository.list()
+            if record.summary.dataset_id not in sample_ids
+        ]
+        return [self._sample_summary(sample) for sample in SAMPLE_DATASETS] + user_datasets
 
     def get_dataset(self, dataset_id: str) -> InputDataSummary:
+        sample = SAMPLE_DATASET_BY_ID.get(dataset_id)
+        if sample is not None:
+            return self._sample_summary(sample)
+
         record = self.repository.get(dataset_id)
         if record is None:
             raise DatasetNotFoundError(dataset_id)
         return record.summary
 
     def preview_dataset(self, dataset_id: str, limit: int = 100) -> DatasetPreviewResponse:
+        sample = SAMPLE_DATASET_BY_ID.get(dataset_id)
+        if sample is not None:
+            return self._preview_geojson(
+                dataset_id=dataset_id,
+                path=sample.path,
+                summary=self._sample_summary(sample),
+                limit=limit,
+            )
+
         record = self.repository.get(dataset_id)
         if record is None:
             raise DatasetNotFoundError(dataset_id)
 
         path = self.storage.resolve_data_ref(record.summary.data_ref)
+        return self._preview_geojson(
+            dataset_id=dataset_id,
+            path=path,
+            summary=record.summary,
+            limit=limit,
+        )
+
+    def _preview_geojson(
+        self,
+        dataset_id: str,
+        path: Path,
+        summary: InputDataSummary,
+        limit: int,
+    ) -> DatasetPreviewResponse:
         feature_collection = json.loads(path.read_text(encoding="utf-8"))
         features = feature_collection.get("features", [])
         if isinstance(features, list):
@@ -109,8 +147,8 @@ class GisDatasetService:
 
         return DatasetPreviewResponse(
             datasetId=dataset_id,
-            bbox=record.summary.bbox,
-            featureCount=record.summary.feature_count,
+            bbox=summary.bbox,
+            featureCount=summary.feature_count,
             returnedFeatureCount=len(feature_collection.get("features", [])),
             data=feature_collection,
         )
@@ -147,6 +185,17 @@ class GisDatasetService:
             )
         )
         return summary
+
+    def _sample_summary(self, sample: SampleDatasetDefinition) -> InputDataSummary:
+        geodata = self._read_geodata(sample.path)
+        return self._summarize_geodata(
+            geodata=geodata,
+            dataset_id=sample.dataset_id,
+            name=sample.name,
+            data_ref=sample.data_ref,
+            source_type="sample",
+            has_declared_crs=self._has_declared_crs(sample.path),
+        )
 
     def _validate_upload_filename(self, filename: str | None) -> None:
         suffix = Path(filename or "").suffix.lower()

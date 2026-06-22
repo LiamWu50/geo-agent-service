@@ -32,12 +32,19 @@ class StreamEvent(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     type: Literal[
+        "data.summary",
+        "plan.created",
         "message.delta",
         "tool.started",
         "tool.completed",
         "tool.failed",
+        "layer.created",
+        "map.command",
+        "chart.created",
+        "clarification",
         "message.completed",
         "error",
+        "done",
     ]
     session_id: str = Field(alias="sessionId")
     message_id: str | None = Field(default=None, alias="messageId")

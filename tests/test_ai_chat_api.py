@@ -10,9 +10,10 @@ from geo_agent_service.modules.ai_chat.repository import AiChatRepository
 from geo_agent_service.modules.ai_chat.routes import get_ai_chat_service
 from geo_agent_service.modules.ai_chat.service import AiChatService
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.schemas import DatasetRecord, FieldSummary, InputDataSummary
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.base import GisTool, GisToolResult
-from geo_agent_service.tools.registry import GisToolRegistry
+from geo_agent_service.tools.registry import GisToolRegistry, create_default_tool_registry
 
 
 class FakeModelClient:
@@ -41,7 +42,7 @@ class EchoTool(GisTool):
 
 
 class FailingTool(GisTool):
-    name = "failing_tool"
+    name = "metadata_search"
     description = "Fails for tests."
 
     async def run(self, payload: dict[str, Any]) -> GisToolResult:
@@ -96,6 +97,60 @@ def event_names(stream_text: str) -> list[str]:
     ]
 
 
+def write_dataset(storage: GisDataStorage) -> InputDataSummary:
+    dataset_id = "dataset_schools"
+    path = storage.normalized_path(dataset_id)
+    path.write_text(
+        """
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "A School", "type": "primary", "student_count": 100},
+      "geometry": {"type": "Point", "coordinates": [116.1, 39.7]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "B School", "type": "middle", "student_count": 200},
+      "geometry": {"type": "Point", "coordinates": [116.2, 39.8]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"name": "C School", "type": "primary", "student_count": 150},
+      "geometry": {"type": "Point", "coordinates": [116.3, 39.9]}
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    summary = InputDataSummary(
+        datasetId=dataset_id,
+        name="schools",
+        sourceType="upload",
+        geometryType="Point",
+        crs=None,
+        featureCount=3,
+        bbox=(116.1, 39.7, 116.3, 39.9),
+        fields=[
+            FieldSummary(name="name", type="string"),
+            FieldSummary(name="type", type="string", sampleValues=["primary", "middle"]),
+            FieldSummary(name="student_count", type="number"),
+        ],
+        warnings=["CRS is missing; spatial distance and area calculations need confirmation."],
+        dataRef=storage.normalized_uri(dataset_id),
+    )
+    DatasetRepository(storage.metadata_path()).save(
+        DatasetRecord(
+            summary=summary,
+            rawUri=storage.upload_uri(dataset_id),
+            normalizedUri=storage.normalized_uri(dataset_id),
+        )
+    )
+    return summary
+
+
 def test_ai_chat_requires_authentication(tmp_path: Path) -> None:
     configure_app(tmp_path)
     try:
@@ -127,14 +182,13 @@ def test_ai_chat_streams_tool_and_message_events(tmp_path: Path) -> None:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         assert event_names(response.text) == [
-            "tool.started",
-            "tool.completed",
+            "data.summary",
             "message.delta",
             "message.delta",
             "message.completed",
         ]
-        assert "analyze schools" in response.text
-        assert "AI summary from 1 tool result(s)" in response.text
+        assert "dataset_1" in response.text
+        assert "AI summary from 0 tool result(s)" in response.text
 
         session_response = client.get(
             "/api/ai-chat/sessions/session_demo",
@@ -144,8 +198,8 @@ def test_ai_chat_streams_tool_and_message_events(tmp_path: Path) -> None:
         session = session_response.json()["session"]
         assert session["status"] == "completed"
         assert [message["role"] for message in session["messages"]] == ["user", "assistant"]
-        assert session["messages"][1]["content"] == "AI summary from 1 tool result(s)"
-        assert session["toolCalls"][0]["status"] == "completed"
+        assert session["messages"][1]["content"] == "AI summary from 0 tool result(s)"
+        assert session["toolCalls"] == []
     finally:
         clear_overrides()
 
@@ -193,11 +247,12 @@ def test_ai_chat_streams_recoverable_tool_failure(tmp_path: Path) -> None:
         response = client.post(
             "/api/ai-chat/sessions/session_demo/messages",
             headers=auth_headers(token),
-            json={"message": "try a failing tool"},
+            json={"message": "这个图层有哪些字段"},
         )
 
         assert response.status_code == 200
         assert event_names(response.text) == [
+            "data.summary",
             "tool.started",
             "tool.failed",
             "message.delta",
@@ -211,6 +266,75 @@ def test_ai_chat_streams_recoverable_tool_failure(tmp_path: Path) -> None:
         ).json()["session"]
         assert session["toolCalls"][0]["status"] == "failed"
         assert session["messages"][1]["status"] == "completed"
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_default_tools_use_selected_dataset_summary_and_full_data(tmp_path: Path) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_dataset(storage)
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_demo/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "按 type 统计 schools 数量和 student_count 总和，有哪些字段",
+                "selectedDatasetIds": ["dataset_schools"],
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "tool.started",
+            "tool.completed",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+        assert '"type": "data.summary"' in response.text
+        assert '"toolName": "metadata_search"' in response.text
+        assert '"toolName": "attribute_summary"' in response.text
+        assert '"type": "primary"' in response.text
+        assert '"count": 2' in response.text
+        assert '"student_count_sum": 250' in response.text
+        session = client.get(
+            "/api/ai-chat/sessions/session_demo",
+            headers=auth_headers(token),
+        ).json()["session"]
+        assert session["dataSummaries"][0]["dataRef"].endswith(
+            "/normalized/dataset_schools/data.geojson"
+        )
+        assert [tool_call["toolName"] for tool_call in session["toolCalls"]] == [
+            "metadata_search",
+            "attribute_summary",
+        ]
     finally:
         clear_overrides()
 

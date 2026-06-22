@@ -140,7 +140,9 @@ def test_register_dataset_from_url_returns_input_data_summary(
 
     list_response = client.get("/api/datasets")
     assert list_response.status_code == 200
-    assert list_response.json()["datasets"][0]["datasetId"] == payload["datasetId"]
+    listed_ids = [item["datasetId"] for item in list_response.json()["datasets"]]
+    assert listed_ids[:3] == ["sample_airports", "sample_ports", "sample_populated_places"]
+    assert payload["datasetId"] in listed_ids
 
 
 def test_register_dataset_from_url_rejects_non_json_response(
@@ -226,7 +228,9 @@ def test_dataset_list_detail_and_preview(tmp_path: Path) -> None:
 
     list_response = client.get("/api/datasets")
     assert list_response.status_code == 200
-    assert [item["datasetId"] for item in list_response.json()["datasets"]] == [dataset_id]
+    listed_ids = [item["datasetId"] for item in list_response.json()["datasets"]]
+    assert listed_ids[:3] == ["sample_airports", "sample_ports", "sample_populated_places"]
+    assert dataset_id in listed_ids
 
     detail_response = client.get(f"/api/datasets/{dataset_id}")
     assert detail_response.status_code == 200
@@ -240,6 +244,27 @@ def test_dataset_list_detail_and_preview(tmp_path: Path) -> None:
     assert preview["returnedFeatureCount"] == 1
     assert preview["data"]["type"] == "FeatureCollection"
     assert len(preview["data"]["features"]) == 1
+
+
+def test_sample_dataset_detail_and_preview(tmp_path: Path) -> None:
+    settings.gis_storage_root = str(tmp_path / "gis")
+    client = TestClient(app)
+
+    detail_response = client.get("/api/datasets/sample_airports")
+    preview_response = client.get("/api/datasets/sample_airports/preview?limit=2")
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["datasetId"] == "sample_airports"
+    assert detail["name"] == "机场"
+    assert detail["sourceType"] == "sample"
+    assert detail["geometryType"] == "Point"
+
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["datasetId"] == "sample_airports"
+    assert preview["returnedFeatureCount"] == 2
+    assert preview["data"]["type"] == "FeatureCollection"
 
 
 def test_missing_dataset_returns_404(tmp_path: Path) -> None:

@@ -16,7 +16,7 @@ from geo_agent_service.modules.auth.routes import (
 from geo_agent_service.modules.auth.service import InvalidTokenError
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
-from geo_agent_service.tools.registry import GisToolRegistry
+from geo_agent_service.tools.registry import GisToolRegistry, create_default_tool_registry
 
 router = APIRouter(prefix="/ai-chat", tags=["ai-chat"])
 
@@ -32,7 +32,12 @@ CurrentUserIdDependency = Annotated[str, Depends(current_user_id)]
 
 
 def get_tool_registry() -> GisToolRegistry:
-    return GisToolRegistry()
+    gis_storage = GisDataStorage(settings.gis_storage_root)
+    dataset_repository = DatasetRepository(gis_storage.metadata_path())
+    return create_default_tool_registry(
+        dataset_repository=dataset_repository,
+        storage=gis_storage,
+    )
 
 
 ToolRegistryDependency = Annotated[GisToolRegistry, Depends(get_tool_registry)]

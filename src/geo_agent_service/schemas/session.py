@@ -2,10 +2,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from geo_agent_service.modules.gis_data.schemas import InputDataSummary
 from geo_agent_service.schemas.agent import (
     AnalysisReport,
     ChartResult,
-    InputDataSummary,
     MapLayerResult,
     PlanStep,
     ThreeSceneAction,

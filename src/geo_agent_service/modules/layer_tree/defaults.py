@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from geo_agent_service.modules.gis_data.sample_datasets import SAMPLE_DATASETS
 from geo_agent_service.modules.layer_tree.schemas import LayerTreeNode
 
 DEFAULT_USER_LAYERS_FOLDER_ID = "user-layers"
@@ -45,37 +46,17 @@ def default_layer_tree() -> list[LayerTreeNode]:
             updatedAt=created_at,
             children=[
                 LayerTreeNode(
-                    id="road-network",
-                    name="道路网络",
-                    iconKey="route",
+                    id=f"layer_{dataset.dataset_id}",
+                    name=dataset.name,
+                    parentId="business-layers",
+                    datasetId=dataset.dataset_id,
+                    sourceType="sample",
+                    iconKey=dataset.icon_key,
                     userManaged=False,
                     createdAt=created_at,
                     updatedAt=created_at,
-                ),
-                LayerTreeNode(
-                    id="traffic-hub",
-                    name="交通枢纽",
-                    iconKey="traffic-cone",
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                ),
-                LayerTreeNode(
-                    id="poi",
-                    name="兴趣点位",
-                    iconKey="map-pinned",
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                ),
-                LayerTreeNode(
-                    id="building",
-                    name="建筑轮廓",
-                    iconKey="building-2",
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                ),
+                )
+                for dataset in SAMPLE_DATASETS
             ],
         ),
         LayerTreeNode(
@@ -96,23 +77,6 @@ def default_layer_tree() -> list[LayerTreeNode]:
             userManaged=False,
             createdAt=created_at,
             updatedAt=created_at,
-            children=[
-                LayerTreeNode(
-                    id="heatmap",
-                    name="客流热力",
-                    iconKey="activity",
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                ),
-                LayerTreeNode(
-                    id="camera",
-                    name="监控点位",
-                    iconKey="camera",
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                ),
-            ],
+            children=[],
         ),
     ]

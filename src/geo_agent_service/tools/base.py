@@ -7,6 +7,8 @@ from pydantic import BaseModel
 class GisToolResult(BaseModel):
     data_ref: str | None = None
     summary: dict[str, Any] = {}
+    layer: dict[str, Any] | None = None
+    map_command: dict[str, Any] | None = None
 
 
 class GisTool(ABC):

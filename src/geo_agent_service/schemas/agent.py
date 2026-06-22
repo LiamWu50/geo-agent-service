@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FieldSummary(BaseModel):
@@ -74,12 +74,14 @@ class AnalysisReport(BaseModel):
 
 
 class ToolCallRecord(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
-    tool_name: str
+    tool_name: str = Field(alias="toolName")
     status: Literal["running", "completed", "failed"]
     input: Any
     output: Any | None = None
     error: AgentError | None = None
-    started_at: str
-    finished_at: str | None = None
-    duration_ms: int | None = None
+    started_at: str = Field(alias="startedAt")
+    finished_at: str | None = Field(default=None, alias="finishedAt")
+    duration_ms: int | None = Field(default=None, alias="durationMs")

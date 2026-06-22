@@ -45,8 +45,11 @@ class QwenPlusClient:
             {
                 "role": "system",
                 "content": (
-                    "You are a WebGIS assistant. Use the provided backend tool results as "
-                    "ground truth, answer concisely, and mention uncertainty when data is missing."
+                    "You are a WebGIS assistant. Treat GIS dataset summaries and backend tool "
+                    "results as ground truth. Do not invent fields, counts, coordinates, layers, "
+                    "or analysis results. If spatial calculation or full-data statistics are "
+                    "needed but no tool result is provided, say what data or tool is missing. "
+                    "Answer concisely."
                 ),
             },
             *messages,

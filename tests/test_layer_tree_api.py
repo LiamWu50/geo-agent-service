@@ -59,6 +59,14 @@ def user_layers(payload: dict[str, Any]) -> dict[str, Any]:
     return next(node for node in payload["nodes"] if node["id"] == "user-layers")
 
 
+def business_layers(payload: dict[str, Any]) -> dict[str, Any]:
+    return next(node for node in payload["nodes"] if node["id"] == "business-layers")
+
+
+def analysis_layers(payload: dict[str, Any]) -> dict[str, Any]:
+    return next(node for node in payload["nodes"] if node["id"] == "analysis-layers")
+
+
 def test_layer_tree_requires_authentication(tmp_path: Path) -> None:
     configure_app(tmp_path)
     client = TestClient(app)
@@ -85,8 +93,18 @@ def test_first_read_returns_default_tree_with_empty_user_layers(tmp_path: Path) 
         "user-layers",
         "analysis-layers",
     ]
+    business_children = business_layers(payload)["children"]
+    assert [child["datasetId"] for child in business_children] == [
+        "sample_airports",
+        "sample_ports",
+        "sample_populated_places",
+    ]
+    assert [child["name"] for child in business_children] == ["机场", "港口", "人口稠密地区"]
+    assert {child["sourceType"] for child in business_children} == {"sample"}
+    assert {child["userManaged"] for child in business_children} == {False}
     assert user_layers(payload)["children"] == []
     assert user_layers(payload)["userManaged"] is False
+    assert analysis_layers(payload)["children"] == []
 
 
 def test_add_dataset_layer_persists_under_user_layers(tmp_path: Path) -> None:
