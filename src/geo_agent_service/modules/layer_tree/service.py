@@ -76,9 +76,11 @@ class LayerTreeService:
         payload: UpdateLayerNodeRequest,
     ) -> LayerTreeNode:
         nodes = self._load_tree(user_id)
-        node = self._require_user_managed_node(nodes, node_id)
+        node = self._require_existing_node(nodes, node_id)
         update_data = payload.model_dump(exclude_unset=True)
         if "name" in update_data and payload.name is not None:
+            if not node.user_managed:
+                raise LayerNodeProtectedError("Default layer nodes cannot be renamed.")
             node.name = payload.name
         if "visible" in update_data and payload.visible is not None:
             node.visible = payload.visible
@@ -182,6 +184,16 @@ class LayerTreeService:
             raise LayerNodeNotFoundError("Layer node not found.")
         if not node.user_managed:
             raise LayerNodeProtectedError("Default layer nodes cannot be modified.")
+        return node
+
+    def _require_existing_node(
+        self,
+        nodes: list[LayerTreeNode],
+        node_id: str,
+    ) -> LayerTreeNode:
+        node = self._find_node(nodes, node_id)
+        if node is None:
+            raise LayerNodeNotFoundError("Layer node not found.")
         return node
 
     def _find_node(self, nodes: list[LayerTreeNode], node_id: str) -> LayerTreeNode | None:

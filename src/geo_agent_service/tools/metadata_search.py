@@ -60,7 +60,9 @@ class MetadataSearchTool(GisTool):
         reasons: list[str] = []
         if not terms:
             reasons.append("selected dataset")
-        if summary.name.lower() in query.lower() or any(term in summary.name.lower() for term in terms):
+        if summary.name.lower() in query.lower() or any(
+            term in summary.name.lower() for term in terms
+        ):
             reasons.append("name matched")
         field_hits = [
             field.name

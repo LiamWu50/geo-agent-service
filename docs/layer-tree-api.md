@@ -218,7 +218,8 @@ HTTP 状态码为 `400`。
 
 ## 3. 更新用户图层节点
 
-更新用户可管理节点的展示属性。默认系统节点 `userManaged=false`，不能通过该接口更新。
+更新图层节点的展示属性。默认系统节点 `userManaged=false` 时允许更新 `visible`、`opacity`，
+但不能重命名；移动和删除仍只允许用户可管理节点。
 
 ```http
 PATCH /api/layer-tree/nodes/{nodeId}
@@ -269,11 +270,11 @@ curl -X PATCH "http://localhost:8000/api/layer-tree/nodes/layer_Nh4yk1a9Tj3upQ9Y
 
 HTTP 状态码为 `404`。
 
-默认节点不允许修改：
+默认节点不允许重命名：
 
 ```json
 {
-  "detail": "Default layer nodes cannot be modified."
+  "detail": "Default layer nodes cannot be renamed."
 }
 ```
 

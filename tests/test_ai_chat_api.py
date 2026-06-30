@@ -2,7 +2,9 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
+import geopandas as gpd  # type: ignore[import-untyped]
 from fastapi.testclient import TestClient
+from shapely.geometry import Point
 
 from geo_agent_service.core.config import settings
 from geo_agent_service.main import app
@@ -11,6 +13,7 @@ from geo_agent_service.modules.ai_chat.routes import get_ai_chat_service
 from geo_agent_service.modules.ai_chat.service import AiChatService
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.schemas import DatasetRecord, FieldSummary, InputDataSummary
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.base import GisTool, GisToolResult
 from geo_agent_service.tools.registry import GisToolRegistry, create_default_tool_registry
@@ -149,6 +152,20 @@ def write_dataset(storage: GisDataStorage) -> InputDataSummary:
         )
     )
     return summary
+
+
+def write_crs_dataset(storage: GisDataStorage) -> InputDataSummary:
+    repository = DatasetRepository(storage.metadata_path())
+    service = GisDatasetService(storage=storage, repository=repository)
+    return service.register_generated_dataset(
+        name="schools",
+        geodata=gpd.GeoDataFrame(
+            {"name": ["A School", "B School"], "type": ["school", "hospital"]},
+            geometry=[Point(116.1, 39.7), Point(116.2, 39.8)],
+            crs="EPSG:4326",
+        ),
+        source_tool_call_id="test_setup",
+    )
 
 
 def test_ai_chat_requires_authentication(tmp_path: Path) -> None:
@@ -335,6 +352,145 @@ def test_ai_chat_default_tools_use_selected_dataset_summary_and_full_data(tmp_pa
             "metadata_search",
             "attribute_summary",
         ]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_geoprocess_buffer_creates_layer_and_map_command(tmp_path: Path) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    source_summary = write_crs_dataset(storage)
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_demo/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "给 schools 做 500 米缓冲区并显示",
+                "selectedDatasetIds": [source_summary.dataset_id],
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+        assert '"toolName": "geoprocess"' in response.text
+        assert '"operation": "buffer"' in response.text
+        assert '"action": "layer.addDataset"' in response.text
+
+        session = client.get(
+            "/api/ai-chat/sessions/session_demo",
+            headers=auth_headers(token),
+        ).json()["session"]
+        tool_call = session["toolCalls"][0]
+        result_dataset_id = tool_call["output"]["summary"]["resultDatasetId"]
+        assert tool_call["toolName"] == "geoprocess"
+        assert result_dataset_id.startswith("dataset_")
+
+        preview_response = client.get(f"/api/datasets/{result_dataset_id}/preview")
+        assert preview_response.status_code == 200
+        preview = preview_response.json()
+        assert preview["featureCount"] == 2
+        assert preview["data"]["features"][0]["geometry"]["type"] in {
+            "Polygon",
+            "MultiPolygon",
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_geoprocess_attribute_filter_creates_filtered_dataset(tmp_path: Path) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    source_summary = write_crs_dataset(storage)
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_filter/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "筛选 type 等于 school 的要素并显示",
+                "selectedDatasetIds": [source_summary.dataset_id],
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+        assert '"operation": "attribute_filter"' in response.text
+        assert '"field": "type"' in response.text
+        assert '"value": "school"' in response.text
+
+        session = client.get(
+            "/api/ai-chat/sessions/session_filter",
+            headers=auth_headers(token),
+        ).json()["session"]
+        result_dataset_id = session["toolCalls"][0]["output"]["summary"]["resultDatasetId"]
+        preview_response = client.get(f"/api/datasets/{result_dataset_id}/preview")
+        assert preview_response.status_code == 200
+        features = preview_response.json()["data"]["features"]
+        assert len(features) == 1
+        assert features[0]["properties"]["type"] == "school"
     finally:
         clear_overrides()
 

@@ -201,7 +201,35 @@ def test_update_move_and_delete_user_layer(tmp_path: Path) -> None:
     assert [child["id"] for child in user_layers(tree_after_delete)["children"]] == [second["id"]]
 
 
-def test_default_nodes_are_protected(tmp_path: Path) -> None:
+def test_default_business_layers_allow_display_updates(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    client = TestClient(app)
+    token = login(client)
+
+    initial_tree = client.get("/api/layer-tree", headers=auth_headers(token)).json()
+    business_children = business_layers(initial_tree)["children"]
+
+    responses = [
+        client.patch(
+            f"/api/layer-tree/nodes/{child['id']}",
+            headers=auth_headers(token),
+            json={"visible": False, "opacity": 0.35},
+        )
+        for child in business_children
+    ]
+    persisted_tree = client.get("/api/layer-tree", headers=auth_headers(token)).json()
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [response.json()["visible"] for response in responses] == [False, False, False]
+    assert [response.json()["opacity"] for response in responses] == [0.35, 0.35, 0.35]
+    assert [child["visible"] for child in business_layers(persisted_tree)["children"]] == [
+        False,
+        False,
+        False,
+    ]
+
+
+def test_default_nodes_are_protected_from_renaming_moving_and_deletion(tmp_path: Path) -> None:
     configure_app(tmp_path)
     client = TestClient(app)
     token = login(client)
@@ -222,5 +250,6 @@ def test_default_nodes_are_protected(tmp_path: Path) -> None:
     )
 
     assert update_response.status_code == 403
+    assert update_response.json() == {"detail": "Default layer nodes cannot be renamed."}
     assert move_response.status_code == 403
     assert delete_response.status_code == 403

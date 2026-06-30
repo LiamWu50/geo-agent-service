@@ -1,7 +1,9 @@
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.attribute_summary import AttributeSummaryTool
 from geo_agent_service.tools.base import GisTool
+from geo_agent_service.tools.geoprocess import GeoprocessTool
 from geo_agent_service.tools.metadata_search import MetadataSearchTool
 
 
@@ -25,6 +27,7 @@ def create_default_tool_registry(
     storage: GisDataStorage,
 ) -> GisToolRegistry:
     registry = GisToolRegistry()
+    dataset_service = GisDatasetService(storage=storage, repository=dataset_repository)
     registry.register(MetadataSearchTool(dataset_repository=dataset_repository))
     registry.register(
         AttributeSummaryTool(
@@ -32,4 +35,5 @@ def create_default_tool_registry(
             storage=storage,
         )
     )
+    registry.register(GeoprocessTool(dataset_service=dataset_service))
     return registry

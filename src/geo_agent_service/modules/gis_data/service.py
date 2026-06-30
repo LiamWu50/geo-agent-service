@@ -36,6 +36,7 @@ GeometryType = Literal[
 ]
 FieldType = Literal["string", "number", "boolean", "date", "unknown"]
 DatasetSourceType = Literal["upload", "url", "sample"]
+GeneratedDatasetSourceType = Literal["generated"]
 MAX_URL_DOWNLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -156,12 +157,43 @@ class GisDatasetService:
     def resolve_data_ref(self, data_ref: str) -> Path:
         return self.storage.resolve_data_ref(data_ref)
 
+    def register_generated_dataset(
+        self,
+        *,
+        name: str,
+        geodata: gpd.GeoDataFrame,
+        source_tool_call_id: str,
+        metadata: dict[str, object] | None = None,
+    ) -> InputDataSummary:
+        dataset_id = self.storage.new_dataset_id()
+        normalized_path = self.storage.normalized_path(dataset_id)
+        geodata.to_file(normalized_path, driver="GeoJSON")
+        normalized_uri = self.storage.normalized_uri(dataset_id)
+
+        summary = self._summarize_geodata(
+            geodata=geodata,
+            dataset_id=dataset_id,
+            name=name,
+            data_ref=normalized_uri,
+            source_type="generated",
+            has_declared_crs=geodata.crs is not None,
+        )
+        self.repository.save(
+            DatasetRecord(
+                summary=summary,
+                rawUri=normalized_uri,
+                normalizedUri=normalized_uri,
+                sourceUrl=None,
+            )
+        )
+        return summary
+
     def _register_dataset_from_path(
         self,
         dataset_id: str,
         raw_path: Path,
         name: str,
-        source_type: DatasetSourceType,
+        source_type: DatasetSourceType | GeneratedDatasetSourceType,
         source_url: str | None = None,
     ) -> InputDataSummary:
         normalized_path = self.storage.normalized_path(dataset_id)
@@ -218,7 +250,7 @@ class GisDatasetService:
         dataset_id: str,
         name: str,
         data_ref: str,
-        source_type: DatasetSourceType,
+        source_type: DatasetSourceType | GeneratedDatasetSourceType,
         has_declared_crs: bool,
     ) -> InputDataSummary:
         warnings: list[str] = []

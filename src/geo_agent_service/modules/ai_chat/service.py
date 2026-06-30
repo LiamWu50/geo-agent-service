@@ -1,4 +1,5 @@
 import json
+import re
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -139,12 +140,14 @@ class AiChatService:
         for tool_name, tool_input in self._select_tool_calls(session, payload):
             tool = self.tool_registry.get(tool_name)
             started_at = datetime.now(UTC)
+            tool_call_id = f"tool_{secrets.token_urlsafe(12)}"
+            tool_input = {**tool_input, "toolCallId": tool_call_id}
             tool_call = ToolCallRecord(
-                id=f"tool_{secrets.token_urlsafe(12)}",
-                tool_name=tool_name,
+                id=tool_call_id,
+                toolName=tool_name,
                 status="running",
                 input=tool_input,
-                started_at=started_at.isoformat(),
+                startedAt=started_at.isoformat(),
             )
             session.tool_calls.append(tool_call)
             yield StreamEvent(
@@ -249,8 +252,48 @@ class AiChatService:
             message,
             ["统计", "数量", "分类", "占比", "平均", "总和", "求和", "汇总", "summary", "count"],
         ):
-            if payload.selected_dataset_ids and "attribute_summary" in self.tool_registry.list_names():
+            if (
+                payload.selected_dataset_ids
+                and "attribute_summary" in self.tool_registry.list_names()
+            ):
                 calls.append(("attribute_summary", self._attribute_summary_input(base_input)))
+        if self._has_any(message, ["缓冲", "buffer", "附近"]):
+            if payload.selected_dataset_ids and "geoprocess" in self.tool_registry.list_names():
+                calls.append(
+                    ("geoprocess", self._geoprocess_input(base_input, operation="buffer"))
+                )
+        elif self._has_any(message, ["中心点", "质心", "centroid"]):
+            if payload.selected_dataset_ids and "geoprocess" in self.tool_registry.list_names():
+                calls.append(
+                    ("geoprocess", self._geoprocess_input(base_input, operation="centroid"))
+                )
+        elif self._has_any(message, ["裁剪", "范围", "bbox", "当前视图"]):
+            if payload.selected_dataset_ids and "geoprocess" in self.tool_registry.list_names():
+                calls.append(
+                    ("geoprocess", self._geoprocess_input(base_input, operation="bbox_clip"))
+                )
+        elif self._has_any(
+            message,
+            [
+                "筛选",
+                "过滤",
+                "filter",
+                "等于",
+                "不等于",
+                "大于",
+                "小于",
+                "超过",
+                "低于",
+                "包含",
+            ],
+        ):
+            if payload.selected_dataset_ids and "geoprocess" in self.tool_registry.list_names():
+                calls.append(
+                    (
+                        "geoprocess",
+                        self._geoprocess_input(base_input, operation="attribute_filter"),
+                    )
+                )
 
         return calls
 
@@ -263,6 +306,58 @@ class AiChatService:
         if group_by:
             payload["groupBy"] = group_by
         return payload
+
+    def _geoprocess_input(
+        self,
+        base_input: dict[str, Any],
+        *,
+        operation: str,
+    ) -> dict[str, Any]:
+        payload = dict(base_input)
+        payload["operation"] = operation
+        if operation == "buffer":
+            parsed_distance = self._infer_distance(str(base_input.get("message") or ""))
+            if parsed_distance is not None:
+                payload["distance"], payload["unit"] = parsed_distance
+        elif operation == "bbox_clip":
+            metadata = base_input.get("metadata")
+            if isinstance(metadata, dict):
+                map_view = metadata.get("mapView")
+                if isinstance(map_view, dict) and "bbox" in map_view:
+                    payload["bbox"] = map_view["bbox"]
+        elif operation == "attribute_filter":
+            field = self._infer_filter_field(
+                str(base_input.get("message") or ""),
+                base_input.get("dataSummaries") or [],
+            )
+            if field:
+                payload["field"] = field
+        return payload
+
+    def _infer_filter_field(self, message: str, summaries: list[Any]) -> str | None:
+        normalized = message.lower()
+        fields: list[str] = []
+        for summary in summaries:
+            summary_fields = summary.get("fields", []) if isinstance(summary, dict) else []
+            for field in summary_fields:
+                if isinstance(field, dict):
+                    name = str(field.get("name") or "")
+                    if name:
+                        fields.append(name)
+        for name in sorted(fields, key=len, reverse=True):
+            if name.lower() in normalized:
+                return name
+        return None
+
+    def _infer_distance(self, message: str) -> tuple[float, str] | None:
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(公里|千米|米|kilometers?|km|meters?|m)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return float(match.group(1)), match.group(2).lower()
 
     def _infer_group_by_field(self, message: str, summaries: list[Any]) -> str | None:
         normalized = message.lower()

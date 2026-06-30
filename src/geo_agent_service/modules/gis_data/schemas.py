@@ -19,7 +19,7 @@ class InputDataSummary(BaseModel):
 
     dataset_id: str = Field(alias="datasetId")
     name: str
-    source_type: Literal["upload", "url", "database", "sample", "map_service"] = Field(
+    source_type: Literal["upload", "url", "database", "sample", "map_service", "generated"] = Field(
         alias="sourceType"
     )
     geometry_type: Literal[
