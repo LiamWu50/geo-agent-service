@@ -854,6 +854,109 @@ def test_ai_chat_plan_only_emits_plan_created_without_tools(tmp_path: Path) -> N
         clear_overrides()
 
 
+def test_ai_chat_spatial_filter_without_real_tool_emits_failed_audit(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_sichuan_dataset(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_sichuan_execute/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请只使用 dataset_f2838ae521d6 和 sample_airports，执行刚才的计划，"
+                    "找出四川省范围内的所有机场，返回名称、IATA 代码、类型，"
+                    "并说明调用了哪个确定性 GIS 工具。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                ],
+                "metadata": {
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                    ],
+                    "layers": [
+                        {"id": "layer_sample_airports", "datasetId": "sample_airports"},
+                        {"id": "layer_sample_ports", "datasetId": "sample_ports"},
+                        {
+                            "id": "layer_sample_populated_places",
+                            "datasetId": "sample_populated_places",
+                        },
+                        {"id": "layer_sichuan", "datasetId": "dataset_f2838ae521d6"},
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.failed",
+            "message.delta",
+            "message.completed",
+        ]
+
+        started = event_payloads(response.text, "tool.started")[0]
+        assert started["data"]["toolName"] == "spatial_filter"
+        tool_input = started["data"]["input"]
+        assert tool_input["inputDatasetId"] == "sample_airports"
+        assert tool_input["maskDatasetId"] == "dataset_f2838ae521d6"
+        assert tool_input["predicate"] == "within"
+        assert tool_input["outputFields"] == ["name", "iata_code", "type"]
+
+        failed = event_payloads(response.text, "tool.failed")[0]
+        assert failed["data"]["toolName"] == "spatial_filter"
+        assert failed["data"]["status"] == "failed"
+        assert failed["data"]["input"]["inputDatasetId"] == "sample_airports"
+        assert failed["data"]["error"]["code"] == "TOOL_NOT_IMPLEMENTED"
+
+        assert event_payloads(response.text, "tool.completed") == []
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "spatial_filter 尚未实现/未执行" in completed_message
+        assert "16" not in completed_message
+        assert "status=success" not in completed_message
+        assert model_client.messages == []
+        assert model_client.tool_results == []
+    finally:
+        clear_overrides()
+
+
 def test_ai_chat_geoprocess_buffer_creates_layer_and_map_command(tmp_path: Path) -> None:
     settings.auth_storage_root = str(tmp_path / "auth")
     settings.gis_storage_root = str(tmp_path / "gis")
