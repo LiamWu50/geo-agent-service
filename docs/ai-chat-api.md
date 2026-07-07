@@ -115,7 +115,7 @@ message.completed
 
 ### data.summary
 
-后端已加载本轮可用数据摘要。前端可用它更新“本轮使用的数据”状态，并提示找不到的数据集。
+后端已加载本轮实际允许使用的数据摘要。前端可用它更新“本轮使用的数据”状态，并提示找不到的数据集。
 
 ```json
 {
@@ -144,11 +144,20 @@ message.completed
         "dataRef": "storage://normalized/dataset_abc123/data.geojson"
       }
     ],
-    "selectedDatasetIds": ["dataset_abc123"],
+    "availableDatasetIds": ["dataset_abc123", "dataset_unused"],
+    "selectedDatasetIds": ["dataset_abc123", "dataset_unused"],
+    "effectiveDatasetIds": ["dataset_abc123"],
     "missingDatasetIds": []
   }
 }
 ```
+
+字段语义：
+
+- `availableDatasetIds`: 当前地图/会话上下文里可用的数据集 ID。
+- `selectedDatasetIds`: 前端请求传入的选中数据集 ID。
+- `effectiveDatasetIds`: 本轮任务实际允许工具读取的数据集 ID。若用户消息明确写出 dataset id，则后端会收敛到这些 ID。
+- `datasets`: 只包含 `effectiveDatasetIds` 对应的数据摘要。
 
 ### tool.started
 
@@ -165,6 +174,8 @@ message.completed
       "message": "筛选 type 等于 school 的要素并显示",
       "selectedDatasetIds": ["dataset_abc123"],
       "datasetIds": ["dataset_abc123"],
+      "availableDatasetIds": ["dataset_abc123"],
+      "effectiveDatasetIds": ["dataset_abc123"],
       "operation": "attribute_filter",
       "field": "type"
     }
@@ -242,7 +253,7 @@ message.completed
 
 ### tool.failed
 
-工具失败不会中断 SSE。前端展示失败状态，然后继续等待助手消息。
+工具失败不会中断 SSE。前端展示失败状态，然后继续等待助手消息。后端会把失败工具调用写入 Agent state，并在最终助手消息中固定说明本轮发生过工具失败。
 
 ```json
 {
@@ -251,12 +262,17 @@ message.completed
   "toolCallId": "tool_x",
   "data": {
     "toolName": "geoprocess",
+    "status": "failed",
+    "input": {
+      "operation": "attribute_filter"
+    },
     "error": {
       "code": "TOOL_FAILED",
       "message": "attribute_filter operation requires a field.",
       "recoverable": true,
       "details": null
-    }
+    },
+    "durationMs": 12
   }
 }
 ```
@@ -273,10 +289,13 @@ message.completed
 | `中心点`、`质心`、`centroid` | `geoprocess(centroid)` | 生成中心点结果 dataset |
 | `裁剪`、`范围`、`bbox`、`当前视图` | `geoprocess(bbox_clip)` | 按 bbox 裁剪生成结果 dataset |
 | `筛选`、`过滤`、`filter`、`等于`、`不等于`、`大于`、`小于`、`超过`、`低于`、`包含` | `geoprocess(attribute_filter)` | 按属性条件筛选要素并生成结果 dataset |
+| `是否适合`、`能否`、`只判断`、`前提条件`、`数据准备`、`不要执行`、`不要调用` | `metadata_search` | 数据准备/适配性判断，只读取摘要，不执行 geoprocess |
 
 注意：
 
 - 多个关键词可能触发多个工具，例如“有哪些字段并按 type 统计数量”会依次执行 `metadata_search` 和 `attribute_summary`。
+- 数据准备/只判断类问题会被标记为 `data_readiness`，只允许调用 `metadata_search`；即使消息里出现“筛选”等词，也不会执行 `attribute_filter`。
+- 如果用户明确写出“不要调用 attribute_filter”，后端会在工具执行前硬拦截任何 `attribute_filter` 调用。
 - `geoprocess` 操作会生成新 dataset，并返回 `layer.created` 和 `map.command`。
 - `buffer` 要求源数据有 CRS；如果数据缺 CRS，会返回 `tool.failed`。
 

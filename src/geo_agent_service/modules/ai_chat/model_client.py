@@ -49,6 +49,9 @@ class QwenPlusClient:
                     "results as ground truth. Do not invent fields, counts, coordinates, layers, "
                     "or analysis results. If spatial calculation or full-data statistics are "
                     "needed but no tool result is provided, say what data or tool is missing. "
+                    "When tool results include status=failed or an error, explicitly say the "
+                    "tool failed and use the real tool input/status; never claim a dataset or "
+                    "sample layer was not called unless the tool event ledger proves it. "
                     "Answer concisely."
                 ),
             },
@@ -58,7 +61,10 @@ class QwenPlusClient:
             payload_messages.append(
                 {
                     "role": "system",
-                    "content": f"Backend tool results: {tool_results}",
+                    "content": (
+                        "Backend tool event ledger. Treat this as authoritative for tool "
+                        f"success/failure, inputs, and outputs: {tool_results}"
+                    ),
                 }
             )
 

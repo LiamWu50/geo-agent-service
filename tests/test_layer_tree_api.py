@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -101,10 +102,86 @@ def test_first_read_returns_default_tree_with_empty_user_layers(tmp_path: Path) 
     ]
     assert [child["name"] for child in business_children] == ["机场", "港口", "人口稠密地区"]
     assert {child["sourceType"] for child in business_children} == {"sample"}
+    assert {child["geometryType"] for child in business_children} == {"Point"}
+    assert {child["crs"] for child in business_children} == {"EPSG:4326"}
+    assert all(child["bbox"] for child in business_children)
     assert {child["userManaged"] for child in business_children} == {False}
     assert user_layers(payload)["children"] == []
     assert user_layers(payload)["userManaged"] is False
     assert analysis_layers(payload)["children"] == []
+
+
+def test_existing_default_tree_hydrates_sample_layer_metadata(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    stored_tree_path = tmp_path / "layer-trees" / "default.json"
+    stored_tree_path.parent.mkdir(parents=True)
+    stored_tree_path.write_text(
+        json.dumps(
+            {
+                "userId": "default",
+                "nodes": [
+                    {
+                        "id": "business-layers",
+                        "name": "业务图层",
+                        "type": "folder",
+                        "parentId": None,
+                        "children": [
+                            {
+                                "id": "layer_sample_airports",
+                                "name": "机场",
+                                "type": "layer",
+                                "parentId": "business-layers",
+                                "children": [],
+                                "datasetId": "sample_airports",
+                                "sourceType": "sample",
+                                "geometryType": None,
+                                "crs": None,
+                                "bbox": None,
+                                "iconKey": "plane",
+                                "visible": False,
+                                "opacity": 0.35,
+                                "userManaged": False,
+                                "createdAt": "2026-01-01T00:00:00Z",
+                                "updatedAt": "2026-01-02T00:00:00Z",
+                            }
+                        ],
+                        "datasetId": None,
+                        "sourceType": None,
+                        "geometryType": None,
+                        "crs": None,
+                        "bbox": None,
+                        "iconKey": "layers",
+                        "visible": True,
+                        "opacity": 1,
+                        "userManaged": False,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-02T00:00:00Z",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(app)
+    token = login(client)
+
+    response = client.get("/api/layer-tree", headers=auth_headers(token))
+
+    assert response.status_code == 200
+    [sample_layer] = business_layers(response.json())["children"]
+    assert sample_layer["geometryType"] == "Point"
+    assert sample_layer["crs"] == "EPSG:4326"
+    assert sample_layer["bbox"] is not None
+    assert sample_layer["visible"] is False
+    assert sample_layer["opacity"] == 0.35
+    assert sample_layer["updatedAt"] == "2026-01-02T00:00:00Z"
+
+    persisted = json.loads(stored_tree_path.read_text(encoding="utf-8"))
+    [persisted_layer] = persisted["nodes"][0]["children"]
+    assert persisted_layer["geometryType"] == "Point"
+    assert persisted_layer["crs"] == "EPSG:4326"
+    assert persisted_layer["bbox"] is not None
 
 
 def test_add_dataset_layer_persists_under_user_layers(tmp_path: Path) -> None:

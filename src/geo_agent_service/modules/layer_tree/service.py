@@ -2,7 +2,9 @@ import secrets
 from datetime import UTC, datetime
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.sample_datasets import SAMPLE_DATASET_BY_ID
 from geo_agent_service.modules.gis_data.schemas import InputDataSummary
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.layer_tree.defaults import (
     DEFAULT_USER_LAYERS_FOLDER_ID,
     default_layer_tree,
@@ -37,9 +39,11 @@ class LayerTreeService:
         self,
         repository: LayerTreeRepository,
         dataset_repository: DatasetRepository,
+        dataset_service: GisDatasetService | None = None,
     ) -> None:
         self.repository = repository
         self.dataset_repository = dataset_repository
+        self.dataset_service = dataset_service
 
     def get_tree(self, user_id: str) -> list[LayerTreeNode]:
         return self._load_tree(user_id)
@@ -131,9 +135,12 @@ class LayerTreeService:
     def _load_tree(self, user_id: str) -> list[LayerTreeNode]:
         nodes = self.repository.get(user_id)
         if nodes is not None:
+            if self._hydrate_sample_layer_metadata(nodes):
+                self.repository.save(user_id, nodes)
             return nodes
         nodes = default_layer_tree()
         self._normalize_parent_ids(nodes)
+        self._hydrate_sample_layer_metadata(nodes)
         self.repository.save(user_id, nodes)
         return nodes
 
@@ -154,6 +161,7 @@ class LayerTreeService:
             datasetId=dataset.dataset_id,
             sourceType=dataset.source_type,
             geometryType=dataset.geometry_type,
+            crs=dataset.crs,
             bbox=dataset.bbox,
             iconKey=self._icon_key_for_geometry(dataset.geometry_type),
             visible=visible,
@@ -234,6 +242,42 @@ class LayerTreeService:
         for node in nodes:
             node.parent_id = parent_id
             self._normalize_parent_ids(node.children, node.id)
+
+    def _hydrate_sample_layer_metadata(self, nodes: list[LayerTreeNode]) -> bool:
+        changed = False
+        for node in nodes:
+            dataset_id = node.dataset_id
+            if dataset_id in SAMPLE_DATASET_BY_ID or node.source_type == "sample":
+                summary = self._sample_summary(dataset_id)
+                if summary is not None:
+                    changed = self._apply_sample_summary(node, summary) or changed
+            changed = self._hydrate_sample_layer_metadata(node.children) or changed
+        return changed
+
+    def _sample_summary(self, dataset_id: str | None) -> InputDataSummary | None:
+        if dataset_id is None or dataset_id not in SAMPLE_DATASET_BY_ID:
+            return None
+        if self.dataset_service is not None:
+            return self.dataset_service.get_dataset(dataset_id)
+        return None
+
+    def _apply_sample_summary(
+        self,
+        node: LayerTreeNode,
+        summary: InputDataSummary,
+    ) -> bool:
+        changed = False
+        updates = {
+            "source_type": summary.source_type,
+            "geometry_type": summary.geometry_type,
+            "crs": summary.crs,
+            "bbox": summary.bbox,
+        }
+        for field, value in updates.items():
+            if getattr(node, field) != value:
+                setattr(node, field, value)
+                changed = True
+        return changed
 
     def _touch(self, node: LayerTreeNode, updated_at: datetime) -> None:
         node.updated_at = updated_at

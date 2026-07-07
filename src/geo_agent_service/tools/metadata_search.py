@@ -2,6 +2,7 @@ from typing import Any
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.schemas import InputDataSummary
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.tools.base import GisTool, GisToolResult
 
 
@@ -9,8 +10,14 @@ class MetadataSearchTool(GisTool):
     name = "metadata_search"
     description = "Search selected GIS dataset metadata by name, geometry, fields, and samples."
 
-    def __init__(self, dataset_repository: DatasetRepository) -> None:
+    def __init__(
+        self,
+        *,
+        dataset_repository: DatasetRepository,
+        dataset_service: GisDatasetService | None = None,
+    ) -> None:
         self.dataset_repository = dataset_repository
+        self.dataset_service = dataset_service
 
     async def run(self, payload: dict[str, Any]) -> GisToolResult:
         query = str(payload.get("query") or payload.get("message") or "").strip()
@@ -37,6 +44,12 @@ class MetadataSearchTool(GisTool):
     def _summaries(self, dataset_ids: list[str]) -> list[InputDataSummary]:
         summaries: list[InputDataSummary] = []
         for dataset_id in dataset_ids:
+            if self.dataset_service is not None:
+                try:
+                    summaries.append(self.dataset_service.get_dataset(dataset_id))
+                    continue
+                except LookupError:
+                    pass
             record = self.dataset_repository.get(dataset_id)
             if record is not None:
                 summaries.append(record.summary)
@@ -78,6 +91,7 @@ class MetadataSearchTool(GisTool):
             "datasetId": summary.dataset_id,
             "name": summary.name,
             "geometryType": summary.geometry_type,
+            "crs": summary.crs,
             "featureCount": summary.feature_count,
             "bbox": summary.bbox,
             "fields": [field.model_dump(mode="json", by_alias=True) for field in summary.fields],

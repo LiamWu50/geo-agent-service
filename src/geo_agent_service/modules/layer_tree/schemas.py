@@ -17,6 +17,7 @@ class LayerTreeNode(BaseModel):
     dataset_id: str | None = Field(default=None, alias="datasetId")
     source_type: str | None = Field(default=None, alias="sourceType")
     geometry_type: str | None = Field(default=None, alias="geometryType")
+    crs: str | None = None
     bbox: tuple[float, float, float, float] | None = None
     icon_key: str | None = Field(default=None, alias="iconKey")
     visible: bool = True

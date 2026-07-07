@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import geopandas as gpd  # type: ignore[import-untyped]
@@ -31,6 +32,7 @@ class AttributeSummaryTool(GisTool):
         path = self.storage.resolve_data_ref(record.summary.data_ref)
         geodata = gpd.read_file(path)
         group_by = self._optional_field(payload.get("groupBy"), geodata)
+        sort_by = self._optional_field(payload.get("sortBy"), geodata)
         requested_metrics = payload.get("metrics")
 
         summary: dict[str, Any] = {
@@ -41,7 +43,16 @@ class AttributeSummaryTool(GisTool):
         }
         if group_by:
             summary["groupBy"] = group_by
-            summary["rows"] = self._group_rows(geodata, group_by, requested_metrics)
+            rows = self._group_rows(geodata, group_by, requested_metrics)
+            if sort_by:
+                rows = self._sort_rows(rows, sort_by, payload.get("sortOrder"))
+                summary["sortBy"] = sort_by
+                summary["sortOrder"] = self._sort_order(payload.get("sortOrder"))
+            summary["rows"] = rows
+        elif payload.get("includeRows") and sort_by:
+            summary["sortBy"] = sort_by
+            summary["sortOrder"] = self._sort_order(payload.get("sortOrder"))
+            summary["rows"] = self._feature_rows(geodata, sort_by, payload.get("sortOrder"))
 
         return GisToolResult(data_ref=record.summary.data_ref, summary=summary)
 
@@ -68,12 +79,14 @@ class AttributeSummaryTool(GisTool):
             if column == geodata.geometry.name:
                 continue
             series = geodata[column]
+            null_mask = series.map(self._is_null_value)
+            non_null = series[~null_mask]
             stats: dict[str, Any] = {
                 "name": column,
-                "count": int(series.notna().sum()),
-                "nullCount": int(series.isna().sum()),
-                "nullRatio": float(series.isna().mean()) if len(series) else None,
-                "uniqueCount": int(series.dropna().nunique()),
+                "count": int((~null_mask).sum()),
+                "nullCount": int(null_mask.sum()),
+                "nullRatio": float(null_mask.mean()) if len(series) else None,
+                "uniqueCount": int(non_null.map(self._hashable_value).nunique()),
             }
             if pandas_types.is_numeric_dtype(series):
                 numeric = pd.to_numeric(series, errors="coerce")
@@ -87,7 +100,7 @@ class AttributeSummaryTool(GisTool):
                     }
                 )
             else:
-                counts = series.dropna().astype(str).value_counts().head(20)
+                counts = non_null.map(self._category_value).value_counts().head(20)
                 stats.update(
                     {
                         "type": "category",
@@ -128,6 +141,43 @@ class AttributeSummaryTool(GisTool):
             rows.append(row)
         return rows
 
+    def _feature_rows(
+        self,
+        geodata: gpd.GeoDataFrame,
+        sort_by: str,
+        sort_order: Any,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for _, record in geodata.drop(columns=[geodata.geometry.name]).iterrows():
+            row = {
+                str(key): self._json_value(value)
+                for key, value in record.to_dict().items()
+            }
+            rows.append(row)
+        return self._sort_rows(rows, sort_by, sort_order)
+
+    def _sort_rows(
+        self,
+        rows: list[dict[str, Any]],
+        sort_by: str,
+        sort_order: Any,
+    ) -> list[dict[str, Any]]:
+        descending = self._sort_order(sort_order) == "desc"
+        sortable = [row for row in rows if row.get(sort_by) is not None]
+        missing = [row for row in rows if row.get(sort_by) is None]
+
+        def sort_key(row: dict[str, Any]) -> tuple[int, float | str]:
+            value = row.get(sort_by)
+            numeric = pd.to_numeric(value, errors="coerce")
+            if not pd.isna(numeric):
+                return (0, float(numeric))
+            return (1, str(value))
+
+        return sorted(sortable, key=sort_key, reverse=descending) + missing
+
+    def _sort_order(self, value: Any) -> str:
+        return "asc" if str(value).lower() == "asc" else "desc"
+
     def _metric_specs(
         self,
         geodata: gpd.GeoDataFrame,
@@ -152,7 +202,46 @@ class AttributeSummaryTool(GisTool):
         ]
 
     def _json_number(self, value: Any) -> float | int | None:
-        if pd.isna(value):
+        if self._is_null_value(value):
             return None
         number = float(value)
         return int(number) if number.is_integer() else number
+
+    def _json_value(self, value: Any) -> Any:
+        if self._is_null_value(value):
+            return None
+        if isinstance(value, (list, tuple)):
+            return [self._json_value(item) for item in value]
+        if self._is_array_value(value):
+            return self._json_value(value.tolist())
+        if isinstance(value, (str, bool)):
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return self._json_number(value)
+        if hasattr(value, "item"):
+            return self._json_value(value.item())
+        return str(value)
+
+    def _is_null_value(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, (list, tuple)):
+            return False
+        if self._is_array_value(value):
+            return False
+        result = pd.isna(value)
+        return bool(result) if isinstance(result, bool) else False
+
+    def _is_array_value(self, value: Any) -> bool:
+        return hasattr(value, "tolist") and int(getattr(value, "ndim", 0)) > 0
+
+    def _hashable_value(self, value: Any) -> str:
+        return json.dumps(self._json_value(value), ensure_ascii=False, sort_keys=True)
+
+    def _category_value(self, value: Any) -> str:
+        normalized = self._json_value(value)
+        if isinstance(normalized, (list, dict)):
+            return json.dumps(normalized, ensure_ascii=False)
+        return str(normalized)

@@ -10,6 +10,7 @@ from geo_agent_service.modules.auth.routes import (
 )
 from geo_agent_service.modules.auth.service import InvalidTokenError
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.modules.layer_tree.repository import LayerTreeRepository
 from geo_agent_service.modules.layer_tree.schemas import (
@@ -33,7 +34,11 @@ def get_layer_tree_service() -> LayerTreeService:
     gis_storage = GisDataStorage(settings.gis_storage_root)
     dataset_repository = DatasetRepository(gis_storage.metadata_path())
     repository = LayerTreeRepository(settings.layer_tree_storage_root)
-    return LayerTreeService(repository=repository, dataset_repository=dataset_repository)
+    return LayerTreeService(
+        repository=repository,
+        dataset_repository=dataset_repository,
+        dataset_service=GisDatasetService(storage=gis_storage, repository=dataset_repository),
+    )
 
 
 LayerTreeServiceDependency = Annotated[LayerTreeService, Depends(get_layer_tree_service)]

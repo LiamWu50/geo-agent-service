@@ -1,9 +1,37 @@
 from datetime import UTC, datetime
+from pathlib import Path
+
+import geopandas as gpd  # type: ignore[import-untyped]
 
 from geo_agent_service.modules.gis_data.sample_datasets import SAMPLE_DATASETS
 from geo_agent_service.modules.layer_tree.schemas import LayerTreeNode
 
 DEFAULT_USER_LAYERS_FOLDER_ID = "user-layers"
+
+
+def _sample_layer_metadata(path: Path) -> dict[str, object]:
+    geodata = gpd.read_file(path)
+    geometry_types = sorted(
+        {
+            geometry_type
+            for geometry_type in geodata.geometry.geom_type.dropna().unique().tolist()
+            if geometry_type
+        }
+    )
+    geometry_type = geometry_types[0] if len(geometry_types) == 1 else "Mixed"
+    total_bounds = geodata.total_bounds
+    return {
+        "geometryType": geometry_type,
+        "crs": geodata.crs.to_string() if geodata.crs is not None else None,
+        "bbox": (
+            float(total_bounds[0]),
+            float(total_bounds[1]),
+            float(total_bounds[2]),
+            float(total_bounds[3]),
+        )
+        if len(total_bounds) == 4
+        else None,
+    }
 
 
 def default_layer_tree() -> list[LayerTreeNode]:
@@ -51,6 +79,7 @@ def default_layer_tree() -> list[LayerTreeNode]:
                     parentId="business-layers",
                     datasetId=dataset.dataset_id,
                     sourceType="sample",
+                    **_sample_layer_metadata(dataset.path),
                     iconKey=dataset.icon_key,
                     userManaged=False,
                     createdAt=created_at,

@@ -155,6 +155,12 @@ class GisDatasetService:
         )
 
     def resolve_data_ref(self, data_ref: str) -> Path:
+        sample_prefix = "sample://"
+        if data_ref.startswith(sample_prefix):
+            dataset_id = data_ref.removeprefix(sample_prefix)
+            sample = SAMPLE_DATASET_BY_ID.get(dataset_id)
+            if sample is not None:
+                return sample.path
         return self.storage.resolve_data_ref(data_ref)
 
     def register_generated_dataset(

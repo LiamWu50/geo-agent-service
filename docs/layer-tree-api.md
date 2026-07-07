@@ -25,6 +25,7 @@
 | `datasetId` | string/null | 数据中心数据集 ID；用户数据图层有值 |
 | `sourceType` | string/null | 数据来源，例如 `upload`、`url` |
 | `geometryType` | string/null | 几何类型，例如 `Point`、`LineString`、`Polygon`、`Mixed`、`Raster` |
+| `crs` | string/null | 坐标参考系，例如 `EPSG:4326` |
 | `bbox` | number[4]/null | 数据范围 `[minX, minY, maxX, maxY]` |
 | `iconKey` | string/null | 前端图标映射 key，不是 React icon 组件 |
 | `visible` | boolean | 是否默认显示 |

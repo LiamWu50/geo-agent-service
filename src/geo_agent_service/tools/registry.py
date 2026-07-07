@@ -28,7 +28,12 @@ def create_default_tool_registry(
 ) -> GisToolRegistry:
     registry = GisToolRegistry()
     dataset_service = GisDatasetService(storage=storage, repository=dataset_repository)
-    registry.register(MetadataSearchTool(dataset_repository=dataset_repository))
+    registry.register(
+        MetadataSearchTool(
+            dataset_repository=dataset_repository,
+            dataset_service=dataset_service,
+        )
+    )
     registry.register(
         AttributeSummaryTool(
             dataset_repository=dataset_repository,

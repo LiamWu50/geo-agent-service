@@ -2,6 +2,7 @@ from pathlib import Path
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.schemas import DatasetRecord, InputDataSummary
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 
 
@@ -10,6 +11,19 @@ def test_storage_resolves_data_ref_inside_storage_root(tmp_path: Path) -> None:
     path = storage.resolve_data_ref("storage://normalized/dataset_001/data.geojson")
 
     assert path == (tmp_path / "gis" / "normalized" / "dataset_001" / "data.geojson").resolve()
+
+
+def test_dataset_service_resolves_sample_data_ref(tmp_path: Path) -> None:
+    storage = GisDataStorage(tmp_path / "gis")
+    service = GisDatasetService(
+        storage=storage,
+        repository=DatasetRepository(storage.metadata_path()),
+    )
+
+    path = service.resolve_data_ref("sample://sample_airports")
+
+    assert path.name == "airports.geojson"
+    assert path.exists()
 
 
 def test_repository_persists_and_reads_dataset_records(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from geo_agent_service.modules.auth.routes import (
 )
 from geo_agent_service.modules.auth.service import InvalidTokenError
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.registry import GisToolRegistry, create_default_tool_registry
 
@@ -45,9 +46,11 @@ ToolRegistryDependency = Annotated[GisToolRegistry, Depends(get_tool_registry)]
 
 def get_ai_chat_service(tool_registry: ToolRegistryDependency) -> AiChatService:
     gis_storage = GisDataStorage(settings.gis_storage_root)
+    dataset_repository = DatasetRepository(gis_storage.metadata_path())
     return AiChatService(
         repository=AiChatRepository(settings.ai_chat_storage_root),
-        dataset_repository=DatasetRepository(gis_storage.metadata_path()),
+        dataset_repository=dataset_repository,
+        dataset_service=GisDatasetService(storage=gis_storage, repository=dataset_repository),
         tool_registry=tool_registry,
         model_client=QwenPlusClient(
             api_key=settings.qwen_api_key,
