@@ -2,6 +2,7 @@ from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
+from pytest import MonkeyPatch
 
 from geo_agent_service.core.config import settings
 from geo_agent_service.main import app
@@ -102,7 +103,7 @@ def test_upload_rejects_empty_geojson_file(tmp_path: Path) -> None:
 
 def test_register_dataset_from_url_returns_input_data_summary(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     settings.gis_storage_root = str(tmp_path / "gis")
     async_client = httpx.AsyncClient
@@ -147,7 +148,7 @@ def test_register_dataset_from_url_returns_input_data_summary(
 
 def test_register_dataset_from_url_rejects_non_json_response(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     settings.gis_storage_root = str(tmp_path / "gis")
     async_client = httpx.AsyncClient
@@ -180,7 +181,7 @@ def test_register_dataset_from_url_rejects_non_json_response(
 
 def test_register_dataset_from_url_handles_array_properties(
     tmp_path: Path,
-    monkeypatch,
+    monkeypatch: MonkeyPatch,
 ) -> None:
     settings.gis_storage_root = str(tmp_path / "gis")
     async_client = httpx.AsyncClient

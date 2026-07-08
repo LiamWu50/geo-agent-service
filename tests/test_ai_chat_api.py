@@ -5,7 +5,7 @@ from typing import Any
 
 import geopandas as gpd  # type: ignore[import-untyped]
 from fastapi.testclient import TestClient
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
 
 from geo_agent_service.core.config import settings
 from geo_agent_service.main import app
@@ -402,6 +402,56 @@ def write_airport_buffer_result(
     return summary
 
 
+def write_population_spatial_filter_result(storage: GisDataStorage) -> InputDataSummary:
+    dataset_id = "dataset_16fb343ba5e6"
+    path = storage.normalized_path(dataset_id)
+    path.write_text(
+        """
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"NAME": "Chengdu", "NAME_ZH": "成都", "POP_MAX": 13568357},
+      "geometry": {"type": "Point", "coordinates": [104.0680736, 30.6719459]}
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    summary = InputDataSummary(
+        datasetId=dataset_id,
+        name="人口稠密地区 空间筛选",
+        sourceType="generated",
+        geometryType="Point",
+        crs="EPSG:4326",
+        featureCount=1,
+        bbox=(104.0680736, 30.6719459, 104.0680736, 30.6719459),
+        fields=[
+            FieldSummary(name="NAME", type="string"),
+            FieldSummary(name="NAME_ZH", type="string"),
+            FieldSummary(name="POP_MAX", type="number"),
+        ],
+        dataRef=storage.normalized_uri(dataset_id),
+        lineage={
+            "operation": "spatial_filter",
+            "inputDatasetId": "sample_populated_places",
+            "maskDatasetId": "dataset_bb1fc4102e6d",
+            "predicate": "within",
+            "outputFields": ["NAME", "NAME_ZH", "POP_MAX"],
+        },
+    )
+    DatasetRepository(storage.metadata_path()).save(
+        DatasetRecord(
+            summary=summary,
+            rawUri=storage.upload_uri(dataset_id),
+            normalizedUri=storage.normalized_uri(dataset_id),
+        )
+    )
+    return summary
+
+
 def test_ai_chat_requires_authentication(tmp_path: Path) -> None:
     configure_app(tmp_path)
     try:
@@ -613,19 +663,18 @@ def test_ai_chat_streams_recoverable_tool_failure(tmp_path: Path) -> None:
             "tool.started",
             "tool.failed",
             "message.delta",
-            "message.delta",
-            "message.delta",
             "message.completed",
         ]
         assert "tool exploded" in response.text
-        assert "本轮曾发生工具调用失败" in response.text
+        assert "本轮工具调用失败" in response.text
+        assert "不会返回 resultDatasetId、featureCount、bbox 或样本记录" in response.text
         session = client.get(
             "/api/ai-chat/sessions/session_demo",
             headers=auth_headers(token),
         ).json()["session"]
         assert session["toolCalls"][0]["status"] == "failed"
         assert session["messages"][1]["status"] == "completed"
-        assert "本轮曾发生工具调用失败" in session["messages"][1]["content"]
+        assert "本轮工具调用失败" in session["messages"][1]["content"]
     finally:
         clear_overrides()
 
@@ -782,6 +831,129 @@ def test_ai_chat_prefers_dataset_explicitly_named_in_message(tmp_path: Path) -> 
         system_prompt = model_client.messages[0]["content"]
         assert "dataset_f2838ae521d6 - 四川省" in system_prompt
         assert "sample_airports" not in system_prompt
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_attribute_summary_on_named_result_layer_does_not_spatial_filter(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_population_spatial_filter_result(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_population_summary/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请基于“人口稠密地区 空间筛选”结果图层 dataset_16fb343ba5e6，"
+                    "统计 POP_MAX 总人口、平均人口、最大值和最小值。"
+                    "只对这个结果图层执行属性统计，不要重新执行空间筛选。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                    "dataset_00eb6853cff3",
+                    "dataset_bae7bf3355a7",
+                    "dataset_bb1fc4102e6d",
+                    "dataset_16fb343ba5e6",
+                ],
+                "metadata": {
+                    "layers": [
+                        {
+                            "id": "layer_WWHuPgqiEQf4cxBU",
+                            "layerId": "layer_WWHuPgqiEQf4cxBU",
+                            "datasetId": "dataset_16fb343ba5e6",
+                            "name": "人口稠密地区 空间筛选",
+                            "visible": True,
+                            "geometryType": "Point",
+                        },
+                    ],
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                        "dataset_00eb6853cff3",
+                        "dataset_bae7bf3355a7",
+                        "dataset_bb1fc4102e6d",
+                        "dataset_16fb343ba5e6",
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "layer.created") == []
+        assert event_payloads(response.text, "map.command") == []
+
+        started = event_payloads(response.text, "tool.started")[0]["data"]
+        assert started["toolName"] == "attribute_summary"
+        tool_input = started["input"]
+        assert tool_input["datasetId"] == "dataset_16fb343ba5e6"
+        assert tool_input["datasetIds"] == ["dataset_16fb343ba5e6"]
+        assert tool_input["field"] == "POP_MAX"
+        assert tool_input["statistics"] == ["sum", "mean", "max", "min"]
+        assert "groupBy" not in tool_input
+        assert "inputDatasetId" not in tool_input
+        assert "maskDatasetId" not in tool_input
+
+        completed = event_payloads(response.text, "tool.completed")[0]["data"]
+        assert completed["toolName"] == "attribute_summary"
+        pop_max = [
+            field
+            for field in completed["output"]["summary"]["fields"]
+            if field["name"] == "POP_MAX"
+        ][0]
+        assert pop_max["sum"] == 13568357
+        assert pop_max["mean"] == 13568357
+        assert pop_max["max"] == 13568357
+        assert pop_max["min"] == 13568357
+
+        message = event_payloads(response.text, "message.completed")[0]["data"]["message"][
+            "content"
+        ]
+        assert "attribute_summary 已执行完成" in message
+        assert "datasetId=dataset_16fb343ba5e6" in message
+        assert "field=POP_MAX" in message
+        assert "总人口=13568357" in message
+        assert "未触发任何空间操作" not in message
+        assert model_client.tool_results == []
     finally:
         clear_overrides()
 
@@ -1418,6 +1590,314 @@ def test_ai_chat_spatial_filter_emits_completed_audit_and_result_layer(
         assert len(model_client.tool_results) == 1
         assert model_client.tool_results[0]["toolName"] == "spatial_filter"
         assert model_client.tool_results[0]["output"]["rows"] == output["rows"]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_executes_population_points_within_existing_buffer_with_spatial_filter(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    buffer_summary = write_airport_buffer_result(
+        storage,
+        dataset_id="dataset_bb1fc4102e6d",
+        tool_call_id="tool_visible_buffer",
+    )
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_population_buffer_execute/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请执行刚才的查询缓冲区内人口稠密地区计划，只使用 "
+                    "sample_populated_places 作为输入点图层，dataset_bb1fc4102e6d "
+                    "作为掩膜面图层，空间关系使用 within，生成结果图层，并返回 "
+                    "resultDatasetId、图层名称、几何类型、bbox、要素数量、输出字段，"
+                    "以及调用的确定性 GIS 工具。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                    "dataset_00eb6853cff3",
+                    "dataset_bae7bf3355a7",
+                    "dataset_bb1fc4102e6d",
+                ],
+                "metadata": {
+                    "layers": [
+                        {
+                            "id": "layer_sample_populated_places",
+                            "layerId": "layer_sample_populated_places",
+                            "datasetId": "sample_populated_places",
+                            "name": "人口稠密地区",
+                            "visible": True,
+                            "geometryType": "Point",
+                        },
+                        {
+                            "id": "layer_4AOG4vg_N9bOy_DF",
+                            "layerId": "layer_4AOG4vg_N9bOy_DF",
+                            "datasetId": "dataset_bb1fc4102e6d",
+                            "name": "机场 空间筛选 缓冲区",
+                            "visible": True,
+                            "geometryType": "Polygon",
+                            "bbox": buffer_summary.bbox,
+                        },
+                    ],
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                        "dataset_00eb6853cff3",
+                        "dataset_bae7bf3355a7",
+                        "dataset_bb1fc4102e6d",
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+        assert '"toolName": "attribute_summary"' not in response.text
+        assert '"toolName": "geoprocess"' not in response.text
+        assert event_payloads(response.text, "tool.failed") == []
+
+        summary_event = event_payloads(response.text, "data.summary")[0]["data"]
+        assert summary_event["effectiveDatasetIds"] == [
+            "sample_populated_places",
+            "dataset_bb1fc4102e6d",
+        ]
+
+        started = event_payloads(response.text, "tool.started")[0]["data"]
+        assert started["toolName"] == "spatial_filter"
+        tool_input = started["input"]
+        assert tool_input["inputDatasetId"] == "sample_populated_places"
+        assert tool_input["maskDatasetId"] == "dataset_bb1fc4102e6d"
+        assert tool_input["predicate"] == "within"
+        assert "NAME" in tool_input["outputFields"]
+        assert "POP_MAX" in tool_input["outputFields"]
+        assert "POP2020" in tool_input["outputFields"]
+
+        completed = event_payloads(response.text, "tool.completed")[0]["data"]
+        assert completed["toolName"] == "spatial_filter"
+        assert completed["status"] == "completed"
+        output = completed["output"]
+        assert output["resultDatasetId"].startswith("dataset_")
+        assert output["featureCount"] == len(output["rows"])
+        assert output["summary"]["inputDatasetId"] == "sample_populated_places"
+        assert output["summary"]["maskDatasetId"] == "dataset_bb1fc4102e6d"
+        assert output["summary"]["predicate"] == "within"
+
+        layer = event_payloads(response.text, "layer.created")[0]["data"]
+        assert layer["datasetId"] == output["resultDatasetId"]
+        assert layer["geometryType"] == "Point"
+        assert layer["metadata"]["operation"] == "spatial_filter"
+        map_command = event_payloads(response.text, "map.command")[0]["data"]
+        assert map_command["datasetId"] == output["resultDatasetId"]
+        assert model_client.tool_results[0]["toolName"] == "spatial_filter"
+        assert model_client.tool_results[0]["status"] == "completed"
+        assert model_client.tool_results[0]["output"]["resultDatasetId"] == output[
+            "resultDatasetId"
+        ]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_map_display_existing_population_result_does_not_run_analysis(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_population_spatial_filter_result(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_8091e24d-3369-4c3c-83ca-d78d8ab59d7b/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请将地图定位到“人口稠密地区 空间筛选”结果图层，并高亮显示该点。"
+                    "只执行地图展示动作，不重新执行任何数据分析工具。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                    "dataset_00eb6853cff3",
+                    "dataset_bae7bf3355a7",
+                    "dataset_bb1fc4102e6d",
+                    "dataset_16fb343ba5e6",
+                    "dataset_fb534d9ba83d",
+                ],
+                "metadata": {
+                    "mapView": {
+                        "center": [104.068074, 30.671946],
+                        "height": 1,
+                        "bbox": [104.068068, 30.671942, 104.06808, 30.67195],
+                        "crs": "EPSG:4326",
+                    },
+                    "layers": [
+                        {
+                            "id": "layer_WWHuPgqiEQf4cxBU",
+                            "layerId": "layer_WWHuPgqiEQf4cxBU",
+                            "datasetId": "dataset_16fb343ba5e6",
+                            "name": "人口稠密地区 空间筛选",
+                            "visible": True,
+                            "opacity": 1,
+                            "geometryType": "Point",
+                            "bbox": [
+                                104.0680736,
+                                30.6719459,
+                                104.0680736,
+                                30.6719459,
+                            ],
+                            "dataRef": "storage://normalized/dataset_16fb343ba5e6/data.geojson",
+                        },
+                        {
+                            "id": "layer_QD1-65dLmANAqT6n",
+                            "layerId": "layer_QD1-65dLmANAqT6n",
+                            "datasetId": "dataset_fb534d9ba83d",
+                            "name": "人口稠密地区 空间筛选 空间筛选",
+                            "visible": True,
+                            "opacity": 1,
+                            "geometryType": "Point",
+                            "bbox": [
+                                104.0680736,
+                                30.6719459,
+                                104.0680736,
+                                30.6719459,
+                            ],
+                            "dataRef": "storage://normalized/dataset_fb534d9ba83d/data.geojson",
+                        },
+                    ],
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                        "dataset_00eb6853cff3",
+                        "dataset_bae7bf3355a7",
+                        "dataset_bb1fc4102e6d",
+                        "dataset_16fb343ba5e6",
+                        "dataset_fb534d9ba83d",
+                    ],
+                    "clientCapabilities": {
+                        "mapCommands": [
+                            "camera.flyTo",
+                            "layer.addDataset",
+                            "layer.setVisible",
+                            "layer.setOpacity",
+                            "overlay.addMarker",
+                            "map.clearTemporary",
+                        ]
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "map.command",
+            "map.command",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "tool.started") == []
+        assert event_payloads(response.text, "tool.completed") == []
+        assert event_payloads(response.text, "layer.created") == []
+        assert '"toolName": "spatial_filter"' not in response.text
+
+        summary_event = event_payloads(response.text, "data.summary")[0]["data"]
+        assert summary_event["effectiveDatasetIds"] == ["dataset_16fb343ba5e6"]
+
+        commands = [event["data"] for event in event_payloads(response.text, "map.command")]
+        assert commands == [
+            {
+                "action": "camera.flyTo",
+                "center": [104.0680736, 30.6719459],
+                "datasetId": "dataset_16fb343ba5e6",
+                "layerId": "layer_WWHuPgqiEQf4cxBU",
+            },
+            {
+                "action": "overlay.addMarker",
+                "coordinates": [104.0680736, 30.6719459],
+                "label": "Chengdu / 成都",
+                "datasetId": "dataset_16fb343ba5e6",
+                "layerId": "layer_WWHuPgqiEQf4cxBU",
+            },
+        ]
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "camera.flyTo" in completed_message
+        assert "overlay.addMarker" in completed_message
+        assert "dataset_16fb343ba5e6" in completed_message
+        assert "layer_WWHuPgqiEQf4cxBU" in completed_message
+        assert "未调用任何数据分析工具" not in completed_message
+        assert model_client.messages == []
+        assert model_client.tool_results == []
     finally:
         clear_overrides()
 

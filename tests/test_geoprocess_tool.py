@@ -2,7 +2,7 @@ from pathlib import Path
 
 import geopandas as gpd  # type: ignore[import-untyped]
 import pytest
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.service import GisDatasetService

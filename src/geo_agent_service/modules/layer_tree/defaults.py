@@ -1,15 +1,25 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypedDict
 
 import geopandas as gpd  # type: ignore[import-untyped]
 
-from geo_agent_service.modules.gis_data.sample_datasets import SAMPLE_DATASETS
+from geo_agent_service.modules.gis_data.sample_datasets import (
+    SAMPLE_DATASETS,
+    SampleDatasetDefinition,
+)
 from geo_agent_service.modules.layer_tree.schemas import LayerTreeNode
 
 DEFAULT_USER_LAYERS_FOLDER_ID = "user-layers"
 
 
-def _sample_layer_metadata(path: Path) -> dict[str, object]:
+class SampleLayerMetadata(TypedDict):
+    geometryType: str
+    crs: str | None
+    bbox: tuple[float, float, float, float] | None
+
+
+def _sample_layer_metadata(path: Path) -> SampleLayerMetadata:
     geodata = gpd.read_file(path)
     geometry_types = sorted(
         {
@@ -32,6 +42,27 @@ def _sample_layer_metadata(path: Path) -> dict[str, object]:
         if len(total_bounds) == 4
         else None,
     }
+
+
+def _sample_layer_node(
+    dataset: SampleDatasetDefinition,
+    created_at: datetime,
+) -> LayerTreeNode:
+    metadata = _sample_layer_metadata(dataset.path)
+    return LayerTreeNode(
+        id=f"layer_{dataset.dataset_id}",
+        name=dataset.name,
+        parentId="business-layers",
+        datasetId=dataset.dataset_id,
+        sourceType="sample",
+        geometryType=metadata["geometryType"],
+        crs=metadata["crs"],
+        bbox=metadata["bbox"],
+        iconKey=dataset.icon_key,
+        userManaged=False,
+        createdAt=created_at,
+        updatedAt=created_at,
+    )
 
 
 def default_layer_tree() -> list[LayerTreeNode]:
@@ -73,19 +104,7 @@ def default_layer_tree() -> list[LayerTreeNode]:
             createdAt=created_at,
             updatedAt=created_at,
             children=[
-                LayerTreeNode(
-                    id=f"layer_{dataset.dataset_id}",
-                    name=dataset.name,
-                    parentId="business-layers",
-                    datasetId=dataset.dataset_id,
-                    sourceType="sample",
-                    **_sample_layer_metadata(dataset.path),
-                    iconKey=dataset.icon_key,
-                    userManaged=False,
-                    createdAt=created_at,
-                    updatedAt=created_at,
-                )
-                for dataset in SAMPLE_DATASETS
+                _sample_layer_node(dataset, created_at) for dataset in SAMPLE_DATASETS
             ],
         ),
         LayerTreeNode(

@@ -26,8 +26,8 @@ class SpatialFilterTool(GisTool):
 
         input_summary = self.dataset_service.get_dataset(input_dataset_id)
         mask_summary = self.dataset_service.get_dataset(mask_dataset_id)
-        input_geodata = gpd.read_file(self.dataset_service.resolve_data_ref(input_summary.data_ref))
-        mask_geodata = gpd.read_file(self.dataset_service.resolve_data_ref(mask_summary.data_ref))
+        input_geodata = self._read_geodata(input_summary.data_ref)
+        mask_geodata = self._read_geodata(mask_summary.data_ref)
 
         input_geodata, mask_geodata = self._align_crs(
             input_geodata,
@@ -40,7 +40,7 @@ class SpatialFilterTool(GisTool):
         mask_geodata = self._repair_geometries(mask_geodata, "mask")
 
         try:
-            mask_geometry = make_valid(mask_geodata.geometry.dropna().union_all())
+            mask_geometry = self._make_valid(self._union_all(mask_geodata))
         except GEOSException as exc:
             raise ValueError(
                 "spatial_filter geometry validation failed for mask dataset."
@@ -59,7 +59,10 @@ class SpatialFilterTool(GisTool):
             ) from exc
 
         result_columns = [*output_fields, input_geodata.geometry.name]
-        result = input_geodata.loc[mask, result_columns].copy().reset_index(drop=True)
+        result = cast(
+            gpd.GeoDataFrame,
+            input_geodata.loc[mask, result_columns].copy().reset_index(drop=True),
+        )
         rows = self._rows(result, output_fields)
         result_name = self._result_name(payload, input_summary.name)
         generated_summary = self.dataset_service.register_generated_dataset(
@@ -118,6 +121,12 @@ class SpatialFilterTool(GisTool):
             map_command=map_command,
         )
 
+    def _read_geodata(self, data_ref: str) -> gpd.GeoDataFrame:
+        return cast(
+            gpd.GeoDataFrame,
+            gpd.read_file(self.dataset_service.resolve_data_ref(data_ref)),
+        )
+
     def _required_string(self, payload: dict[str, Any], key: str) -> str:
         value = str(payload.get(key) or "").strip()
         if not value:
@@ -154,7 +163,12 @@ class SpatialFilterTool(GisTool):
         if input_crs is None or mask_crs is None:
             raise ValueError("spatial_filter requires matching CRS; one dataset is missing CRS.")
         if input_geodata.crs != mask_geodata.crs:
-            mask_geodata = mask_geodata.to_crs(input_geodata.crs)
+            target_crs = input_geodata.crs
+            if target_crs is None:
+                raise ValueError(
+                    "spatial_filter requires matching CRS; input dataset is missing CRS."
+                )
+            mask_geodata = mask_geodata.to_crs(target_crs)
         return input_geodata, mask_geodata
 
     def _repair_geometries(
@@ -165,7 +179,7 @@ class SpatialFilterTool(GisTool):
         repaired = geodata.copy()
         try:
             repaired.geometry = repaired.geometry.map(
-                lambda geometry: make_valid(geometry) if geometry is not None else geometry
+                lambda geometry: self._make_valid(geometry) if geometry is not None else geometry
             )
         except GEOSException as exc:
             raise ValueError(
@@ -200,13 +214,27 @@ class SpatialFilterTool(GisTool):
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for record in geodata[output_fields].to_dict(orient="records"):
+            if not isinstance(record, dict):
+                continue
             rows.append(
                 {
-                    key: None if pd.isna(value) else value
+                    str(key): None if self._is_null_value(value) else value
                     for key, value in record.items()
                 }
             )
         return rows
+
+    def _make_valid(self, geometry: Any) -> Any:
+        return make_valid(geometry)
+
+    def _union_all(self, geodata: gpd.GeoDataFrame) -> Any:
+        return cast(Any, geodata.geometry.dropna()).union_all()
+
+    def _is_null_value(self, value: Any) -> bool:
+        if value is None:
+            return True
+        result = pd.isna(value)
+        return bool(result) if isinstance(result, bool) else False
 
     def _result_name(self, payload: dict[str, Any], input_name: str) -> str:
         result_name = str(payload.get("resultName") or "").strip()
