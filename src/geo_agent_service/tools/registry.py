@@ -5,6 +5,7 @@ from geo_agent_service.tools.attribute_summary import AttributeSummaryTool
 from geo_agent_service.tools.base import GisTool
 from geo_agent_service.tools.geoprocess import GeoprocessTool
 from geo_agent_service.tools.metadata_search import MetadataSearchTool
+from geo_agent_service.tools.spatial_filter import SpatialFilterTool
 
 
 class GisToolRegistry:
@@ -41,4 +42,5 @@ def create_default_tool_registry(
         )
     )
     registry.register(GeoprocessTool(dataset_service=dataset_service))
+    registry.register(SpatialFilterTool(dataset_service=dataset_service))
     return registry

@@ -23,9 +23,14 @@ class GeoprocessTool(GisTool):
         dataset_id = self._dataset_id(payload)
         source_summary = self.dataset_service.get_dataset(dataset_id)
         geodata = gpd.read_file(self.dataset_service.resolve_data_ref(source_summary.data_ref))
+        processing_crs: str | None = None
+        area: dict[str, Any] | None = None
+        distance_meters: float | None = None
 
         if operation == "buffer":
-            result = self._buffer(geodata, self._distance_meters(payload))
+            distance_meters = self._distance_meters(payload)
+            result, processing_crs = self._buffer(geodata, distance_meters, payload)
+            area = self._area_summary(result, processing_crs)
         elif operation == "centroid":
             result = self._centroid(geodata)
         elif operation == "bbox_clip":
@@ -34,20 +39,34 @@ class GeoprocessTool(GisTool):
             result = self._attribute_filter(geodata, payload)
 
         result_name = self._result_name(payload, source_summary.name, operation)
+        lineage = self._lineage(
+            payload=payload,
+            source_dataset_id=dataset_id,
+            operation=operation,
+            processing_crs=processing_crs,
+            distance_meters=distance_meters,
+        )
         generated_summary = self.dataset_service.register_generated_dataset(
             name=result_name,
             geodata=result,
             source_tool_call_id=str(payload.get("toolCallId") or ""),
-            metadata={"sourceDatasetId": dataset_id, "operation": operation},
+            metadata=lineage,
         )
         summary = {
             "sourceDatasetId": dataset_id,
+            "inputDatasetId": dataset_id,
             "resultDatasetId": generated_summary.dataset_id,
             "operation": operation,
             "featureCount": generated_summary.feature_count,
+            "geometryType": generated_summary.geometry_type,
             "bbox": generated_summary.bbox,
+            "area": area,
+            "dataRef": generated_summary.data_ref,
+            "lineage": generated_summary.lineage,
             "result": generated_summary.model_dump(mode="json", by_alias=True),
         }
+        if processing_crs:
+            summary["processingCRS"] = processing_crs
         if operation == "attribute_filter":
             summary["filter"] = self._filter_spec(payload, geodata)
 
@@ -82,7 +101,7 @@ class GeoprocessTool(GisTool):
         )
 
     def _dataset_id(self, payload: dict[str, Any]) -> str:
-        dataset_id = payload.get("datasetId")
+        dataset_id = payload.get("inputDatasetId") or payload.get("datasetId")
         if not dataset_id:
             dataset_ids = payload.get("datasetIds") or payload.get("selectedDatasetIds") or []
             dataset_id = dataset_ids[0] if dataset_ids else None
@@ -156,19 +175,24 @@ class GeoprocessTool(GisTool):
             raise ValueError("bbox must satisfy minX < maxX and minY < maxY.")
         return min_x, min_y, max_x, max_y
 
-    def _buffer(self, geodata: gpd.GeoDataFrame, distance_meters: float) -> gpd.GeoDataFrame:
+    def _buffer(
+        self,
+        geodata: gpd.GeoDataFrame,
+        distance_meters: float,
+        payload: dict[str, Any],
+    ) -> tuple[gpd.GeoDataFrame, str]:
         if geodata.crs is None:
             raise ValueError("buffer operation requires a dataset CRS.")
-        working = self._project_for_metric_operation(geodata)
+        working = self._project_for_metric_operation(geodata, payload)
         result = working.copy()
         result.geometry = working.geometry.buffer(distance_meters)
         if geodata.crs is not None and result.crs != geodata.crs:
             result = result.to_crs(geodata.crs)
-        return result
+        return result, working.crs.to_string()
 
     def _centroid(self, geodata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         working = (
-            self._project_for_metric_operation(geodata)
+            self._project_for_metric_operation(geodata, {})
             if geodata.crs is not None
             else geodata
         )
@@ -332,13 +356,62 @@ class GeoprocessTool(GisTool):
             return value
         return value
 
-    def _project_for_metric_operation(self, geodata: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    def _project_for_metric_operation(
+        self,
+        geodata: gpd.GeoDataFrame,
+        payload: dict[str, Any],
+    ) -> gpd.GeoDataFrame:
+        requested_crs = str(payload.get("processingCRS") or "").strip()
+        if requested_crs and requested_crs.lower() != "geodesic":
+            return geodata.to_crs(requested_crs)
         if geodata.crs is None or not geodata.crs.is_geographic:
             return geodata
         target_crs = geodata.estimate_utm_crs()
         if target_crs is None:
             raise ValueError("Unable to estimate a projected CRS for this dataset.")
         return geodata.to_crs(target_crs)
+
+    def _area_summary(
+        self,
+        geodata: gpd.GeoDataFrame,
+        processing_crs: str | None,
+    ) -> dict[str, Any] | None:
+        if not processing_crs:
+            return None
+        working = geodata.to_crs(processing_crs)
+        area = float(working.geometry.area.sum())
+        return {
+            "value": area,
+            "unit": "square_meters",
+            "processingCRS": processing_crs,
+        }
+
+    def _lineage(
+        self,
+        *,
+        payload: dict[str, Any],
+        source_dataset_id: str,
+        operation: GeoprocessOperation,
+        processing_crs: str | None,
+        distance_meters: float | None,
+    ) -> dict[str, Any]:
+        lineage: dict[str, Any] = {
+            "sourceDatasetId": source_dataset_id,
+            "inputDatasetId": source_dataset_id,
+            "operation": operation,
+        }
+        if operation == "buffer":
+            lineage["distance"] = self._clean_number(distance_meters or 0)
+            lineage["unit"] = "meters"
+            if processing_crs:
+                lineage["processingCRS"] = processing_crs
+        tool_call_id = str(payload.get("toolCallId") or "")
+        if tool_call_id:
+            lineage["toolCallId"] = tool_call_id
+        return lineage
+
+    def _clean_number(self, value: float) -> int | float:
+        return int(value) if value.is_integer() else value
 
     def _result_name(
         self,

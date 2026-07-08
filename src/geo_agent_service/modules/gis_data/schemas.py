@@ -38,6 +38,7 @@ class InputDataSummary(BaseModel):
     fields: list[FieldSummary] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     data_ref: str = Field(alias="dataRef")
+    lineage: dict[str, Any] | None = None
 
 
 class DatasetRecord(BaseModel):

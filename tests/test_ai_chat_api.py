@@ -226,6 +226,55 @@ def write_sichuan_dataset(storage: GisDataStorage) -> InputDataSummary:
     return summary
 
 
+def write_sichuan_polygon_dataset(storage: GisDataStorage) -> InputDataSummary:
+    dataset_id = "dataset_f2838ae521d6"
+    path = storage.normalized_path(dataset_id)
+    path.write_text(
+        """
+{
+  "type": "FeatureCollection",
+  "crs": {"type": "name", "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}},
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "四川省"},
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [97.35, 26.04],
+          [108.55, 26.04],
+          [108.55, 34.32],
+          [97.35, 34.32],
+          [97.35, 26.04]
+        ]]
+      }
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    summary = InputDataSummary(
+        datasetId=dataset_id,
+        name="四川省",
+        sourceType="upload",
+        geometryType="Polygon",
+        crs="EPSG:4326",
+        featureCount=1,
+        bbox=(97.35, 26.04, 108.55, 34.32),
+        fields=[FieldSummary(name="name", type="string")],
+        dataRef=storage.normalized_uri(dataset_id),
+    )
+    DatasetRepository(storage.metadata_path()).save(
+        DatasetRecord(
+            summary=summary,
+            rawUri=storage.upload_uri(dataset_id),
+            normalizedUri=storage.normalized_uri(dataset_id),
+        )
+    )
+    return summary
+
+
 def write_crs_dataset(storage: GisDataStorage) -> InputDataSummary:
     repository = DatasetRepository(storage.metadata_path())
     service = GisDatasetService(storage=storage, repository=repository)
@@ -238,6 +287,61 @@ def write_crs_dataset(storage: GisDataStorage) -> InputDataSummary:
         ),
         source_tool_call_id="test_setup",
     )
+
+
+def write_airport_spatial_filter_result(storage: GisDataStorage) -> InputDataSummary:
+    dataset_id = "dataset_00eb6853cff3"
+    path = storage.normalized_path(dataset_id)
+    path.write_text(
+        """
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"name": "Chengdu Shuangliu", "iata_code": "CTU", "type": "airport"},
+      "geometry": {"type": "Point", "coordinates": [103.95613648169501, 30.581071264746427]}
+    }
+  ]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    summary = InputDataSummary(
+        datasetId=dataset_id,
+        name="机场 空间筛选",
+        sourceType="generated",
+        geometryType="Point",
+        crs="EPSG:4326",
+        featureCount=1,
+        bbox=(
+            103.95613648169501,
+            30.581071264746427,
+            103.95613648169501,
+            30.581071264746427,
+        ),
+        fields=[
+            FieldSummary(name="name", type="string"),
+            FieldSummary(name="iata_code", type="string"),
+            FieldSummary(name="type", type="string"),
+        ],
+        dataRef=storage.normalized_uri(dataset_id),
+        lineage={
+            "operation": "spatial_filter",
+            "inputDatasetId": "sample_airports",
+            "maskDatasetId": "dataset_f2838ae521d6",
+            "predicate": "within",
+            "outputFields": ["name", "iata_code", "type"],
+        },
+    )
+    DatasetRepository(storage.metadata_path()).save(
+        DatasetRecord(
+            summary=summary,
+            rawUri=storage.upload_uri(dataset_id),
+            normalizedUri=storage.normalized_uri(dataset_id),
+        )
+    )
+    return summary
 
 
 def test_ai_chat_requires_authentication(tmp_path: Path) -> None:
@@ -854,7 +958,7 @@ def test_ai_chat_plan_only_emits_plan_created_without_tools(tmp_path: Path) -> N
         clear_overrides()
 
 
-def test_ai_chat_spatial_filter_without_real_tool_emits_failed_audit(
+def test_ai_chat_plan_only_buffer_uses_existing_result_dataset_without_tools(
     tmp_path: Path,
 ) -> None:
     settings.auth_storage_root = str(tmp_path / "auth")
@@ -865,7 +969,145 @@ def test_ai_chat_spatial_filter_without_real_tool_emits_failed_audit(
     settings.auth_token_secret = "test-secret"
     settings.auth_token_expire_minutes = 60
     storage = GisDataStorage(settings.gis_storage_root)
-    write_sichuan_dataset(storage)
+    write_sichuan_polygon_dataset(storage)
+    write_airport_spatial_filter_result(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_8091e24d-3369-4c3c-83ca-d78d8ab59d7b/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请基于刚才的“机场 空间筛选”结果图层 dataset_00eb6853cff3，"
+                    "生成 50 公里缓冲区分析计划。只生成计划，不要执行任何工具。"
+                    "计划必须分为：数据准备、坐标系与距离单位处理、缓冲区计算、结果输出。"
+                    "请明确说明不会重新执行机场筛选，也不会生成新图层。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                    "dataset_00eb6853cff3",
+                    "dataset_bae7bf3355a7",
+                ],
+                "metadata": {
+                    "mapView": {
+                        "center": [103.954932, 30.582716],
+                        "height": 3845.92,
+                        "bbox": [103.931775, 30.568767, 103.978088, 30.59666],
+                        "crs": "EPSG:4326",
+                    },
+                    "layers": [
+                        {
+                            "id": "layer_58Xhznd_LAd_zfaP",
+                            "layerId": "layer_58Xhznd_LAd_zfaP",
+                            "datasetId": "dataset_00eb6853cff3",
+                            "name": "机场 空间筛选",
+                            "visible": True,
+                            "opacity": 1,
+                            "geometryType": "Point",
+                            "bbox": [
+                                103.95613648169501,
+                                30.581071264746427,
+                                103.95613648169501,
+                                30.581071264746427,
+                            ],
+                            "dataRef": "storage://normalized/dataset_00eb6853cff3/data.geojson",
+                        }
+                    ],
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                        "dataset_00eb6853cff3",
+                        "dataset_bae7bf3355a7",
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "plan.created",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "tool.started") == []
+        assert event_payloads(response.text, "tool.completed") == []
+        assert event_payloads(response.text, "layer.created") == []
+        assert event_payloads(response.text, "map.command") == []
+        assert "resultDatasetId" not in response.text
+        assert model_client.messages == []
+
+        summary_event = event_payloads(response.text, "data.summary")[0]
+        assert summary_event["data"]["effectiveDatasetIds"] == [
+            "dataset_00eb6853cff3"
+        ]
+        assert summary_event["data"]["datasets"][0]["datasetId"] == "dataset_00eb6853cff3"
+
+        plan_data = event_payloads(response.text, "plan.created")[0]["data"]
+        assert plan_data["planType"] == "buffer_analysis"
+        assert plan_data["targetDatasetId"] == "dataset_00eb6853cff3"
+        assert plan_data["distance"] == 50
+        assert plan_data["unit"] == "km"
+        assert plan_data["execute"] is False
+        assert [step["title"] for step in plan_data["steps"]] == [
+            "数据准备",
+            "坐标系与距离单位处理",
+            "缓冲区计算",
+            "结果输出",
+        ]
+        crs_step = plan_data["steps"][1]["description"]
+        assert "严格等距投影" not in crs_step
+        assert "本地米制投影，适合局部距离计算" in crs_step
+        assert "方位等距投影或 geodesic buffer" in crs_step
+        assert plan_data["steps"][2]["parameters"] == {
+            "distance": 50,
+            "unit": "km",
+        }
+
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "只使用 dataset_00eb6853cff3" in completed_message
+        assert "不重新执行机场筛选" in completed_message
+        assert "不生成新图层" in completed_message
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_spatial_filter_emits_completed_audit_and_result_layer(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_sichuan_polygon_dataset(storage)
     model_client = FakeModelClient()
 
     def fake_service() -> AiChatService:
@@ -925,7 +1167,10 @@ def test_ai_chat_spatial_filter_without_real_tool_emits_failed_audit(
         assert event_names(response.text) == [
             "data.summary",
             "tool.started",
-            "tool.failed",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+            "message.delta",
             "message.delta",
             "message.completed",
         ]
@@ -938,20 +1183,247 @@ def test_ai_chat_spatial_filter_without_real_tool_emits_failed_audit(
         assert tool_input["predicate"] == "within"
         assert tool_input["outputFields"] == ["name", "iata_code", "type"]
 
-        failed = event_payloads(response.text, "tool.failed")[0]
-        assert failed["data"]["toolName"] == "spatial_filter"
-        assert failed["data"]["status"] == "failed"
-        assert failed["data"]["input"]["inputDatasetId"] == "sample_airports"
-        assert failed["data"]["error"]["code"] == "TOOL_NOT_IMPLEMENTED"
+        completed = event_payloads(response.text, "tool.completed")[0]
+        assert completed["data"]["toolName"] == "spatial_filter"
+        assert completed["data"]["status"] == "completed"
+        output = completed["data"]["output"]
+        assert output["featureCount"] == len(output["rows"])
+        assert output["featureCount"] >= 1
+        assert output["resultDatasetId"].startswith("dataset_")
+        assert output["summary"]["inputDatasetId"] == "sample_airports"
+        assert output["summary"]["maskDatasetId"] == "dataset_f2838ae521d6"
+        assert output["summary"]["predicate"] == "within"
+        assert output["summary"]["outputFields"] == ["name", "iata_code", "type"]
+        assert all(set(row) == {"name", "iata_code", "type"} for row in output["rows"])
+        assert any(row["iata_code"] == "CTU" for row in output["rows"])
 
-        assert event_payloads(response.text, "tool.completed") == []
+        layer = event_payloads(response.text, "layer.created")[0]["data"]
+        assert layer["datasetId"] == output["resultDatasetId"]
+        assert layer["metadata"]["operation"] == "spatial_filter"
+        map_command = event_payloads(response.text, "map.command")[0]["data"]
+        assert map_command["action"] == "layer.addDataset"
+        assert map_command["datasetId"] == output["resultDatasetId"]
+
+        assert event_payloads(response.text, "tool.failed") == []
         completed_message = event_payloads(response.text, "message.completed")[0]["data"][
             "message"
         ]["content"]
-        assert "spatial_filter 尚未实现/未执行" in completed_message
+        assert "spatial_filter 尚未实现/未执行" not in completed_message
         assert "16" not in completed_message
         assert "status=success" not in completed_message
-        assert model_client.messages == []
+        assert len(model_client.tool_results) == 1
+        assert model_client.tool_results[0]["toolName"] == "spatial_filter"
+        assert model_client.tool_results[0]["output"]["rows"] == output["rows"]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_result_layer_inspection_is_read_only_and_uses_lineage(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_sichuan_polygon_dataset(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        execute_response = client.post(
+            "/api/ai-chat/sessions/session_sichuan_inspection/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请只使用 dataset_f2838ae521d6 和 sample_airports，"
+                    "找出四川省范围内的所有机场，返回名称、IATA 代码、类型。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "dataset_f2838ae521d6",
+                ],
+                "metadata": {
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "dataset_f2838ae521d6",
+                    ],
+                    "layers": [
+                        {
+                            "id": "layer_sample_airports",
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                        },
+                        {
+                            "id": "layer_sichuan",
+                            "layerId": "layer_sichuan",
+                            "datasetId": "dataset_f2838ae521d6",
+                            "name": "四川省",
+                        },
+                    ],
+                },
+            },
+        )
+        assert execute_response.status_code == 200
+        result_dataset_id = event_payloads(execute_response.text, "tool.completed")[0][
+            "data"
+        ]["output"]["resultDatasetId"]
+        result_summary = GisDatasetService(
+            storage=storage,
+            repository=DatasetRepository(storage.metadata_path()),
+        ).get_dataset(result_dataset_id)
+        assert result_summary.lineage == {
+            "inputDatasetId": "sample_airports",
+            "maskDatasetId": "dataset_f2838ae521d6",
+            "predicate": "within",
+            "outputFields": ["name", "iata_code", "type"],
+            "operation": "spatial_filter",
+            "toolCallId": event_payloads(execute_response.text, "tool.started")[0]["toolCallId"],
+        }
+        repository = DatasetRepository(storage.metadata_path())
+        result_record = repository.get(result_dataset_id)
+        assert result_record is not None
+        repository.save(
+            result_record.model_copy(
+                update={"summary": result_record.summary.model_copy(update={"lineage": None})}
+            )
+        )
+        stale_summary = GisDatasetService(
+            storage=storage,
+            repository=repository,
+        ).register_generated_dataset(
+            name="机场 空间筛选",
+            geodata=gpd.GeoDataFrame(
+                {"name": ["stale"]},
+                geometry=[Point(103.9, 30.5)],
+                crs="EPSG:4326",
+            ),
+            source_tool_call_id="tool_stale",
+            metadata={
+                "operation": "spatial_filter",
+                "inputDatasetId": "sample_airports",
+                "maskDatasetId": "dataset_f2838ae521d6",
+                "predicate": "within",
+                "outputFields": ["name"],
+            },
+        )
+
+        inspect_response = client.post(
+            "/api/ai-chat/sessions/session_sichuan_inspection/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请说明刚才生成的“机场 空间筛选”结果图层的信息，包括图层 ID、"
+                    "数据集 ID、几何类型、bbox、来源输入图层、空间关系、要素数量，"
+                    "并判断这个结果图层是否可以继续用于后续分析。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "dataset_f2838ae521d6",
+                    result_dataset_id,
+                    stale_summary.dataset_id,
+                ],
+                "metadata": {
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "dataset_f2838ae521d6",
+                        result_dataset_id,
+                        stale_summary.dataset_id,
+                    ],
+                    "layers": [
+                        {
+                            "id": "layer_sample_airports",
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                        },
+                        {
+                            "id": "layer_sichuan",
+                            "layerId": "layer_sichuan",
+                            "datasetId": "dataset_f2838ae521d6",
+                            "name": "四川省",
+                            "geometryType": "Polygon",
+                        },
+                        {
+                            "id": "layer_58Xhznd_LAd_zfaP",
+                            "layerId": "layer_58Xhznd_LAd_zfaP",
+                            "datasetId": result_dataset_id,
+                            "name": "机场 空间筛选",
+                            "geometryType": "Point",
+                            "bbox": result_summary.bbox,
+                            "dataRef": result_summary.data_ref,
+                        },
+                        {
+                            "id": f"layer_{stale_summary.dataset_id}",
+                            "layerId": f"layer_{stale_summary.dataset_id}",
+                            "datasetId": stale_summary.dataset_id,
+                            "name": "机场 空间筛选",
+                            "visible": True,
+                            "geometryType": "Point",
+                            "bbox": stale_summary.bbox,
+                            "dataRef": stale_summary.data_ref,
+                        },
+                    ],
+                },
+            },
+        )
+
+        assert inspect_response.status_code == 200
+        assert event_names(inspect_response.text) == [
+            "data.summary",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(inspect_response.text, "tool.started") == []
+        assert event_payloads(inspect_response.text, "tool.completed") == []
+        assert event_payloads(inspect_response.text, "layer.created") == []
+        assert event_payloads(inspect_response.text, "map.command") == []
+        assert result_dataset_id in inspect_response.text
+        summary_event = event_payloads(inspect_response.text, "data.summary")[0]["data"]
+        assert summary_event["effectiveDatasetIds"] == [result_dataset_id]
+        summary_datasets = summary_event["datasets"]
+        assert [dataset["datasetId"] for dataset in summary_datasets] == [result_dataset_id]
+        assert summary_datasets[0]["lineage"] == {
+            "operation": "spatial_filter",
+            "inputDatasetId": "sample_airports",
+            "maskDatasetId": "dataset_f2838ae521d6",
+            "predicate": "within",
+            "outputFields": ["name", "iata_code", "type"],
+            "toolCallId": event_payloads(execute_response.text, "tool.started")[0]["toolCallId"],
+        }
+        persisted_result = DatasetRepository(storage.metadata_path()).get(result_dataset_id)
+        assert persisted_result is not None
+        assert persisted_result.summary.lineage == summary_datasets[0]["lineage"]
+        assert "layer_58Xhznd_LAd_zfaP" in model_client.messages[0]["content"]
+        assert "lineage" in model_client.messages[0]["content"]
+        assert "sample_airports" in model_client.messages[0]["content"]
+        assert "dataset_f2838ae521d6" in model_client.messages[0]["content"]
+        assert stale_summary.dataset_id not in model_client.messages[0]["content"]
+        assert "点位严格位于多边形内部" in model_client.messages[0]["content"]
+        assert "不要用“应为”“可能是”等推测语气" in model_client.messages[0]["content"]
+        assert "result_layer_inspection" in model_client.messages[0]["content"]
         assert model_client.tool_results == []
     finally:
         clear_overrides()
@@ -1027,6 +1499,154 @@ def test_ai_chat_geoprocess_buffer_creates_layer_and_map_command(tmp_path: Path)
             "Polygon",
             "MultiPolygon",
         }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_executes_prior_50km_buffer_plan_with_real_tool_events(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    write_sichuan_polygon_dataset(storage)
+    write_airport_spatial_filter_result(storage)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_8091e24d-3369-4c3c-83ca-d78d8ab59d7b/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请执行刚才的 50 公里缓冲区分析计划，只使用 dataset_00eb6853cff3 "
+                    "作为输入，生成缓冲区结果图层，并返回 resultDatasetId、图层名称、"
+                    "几何类型、bbox、面积估算、使用的坐标系/距离单位处理方式。"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    "dataset_f2838ae521d6",
+                    "dataset_00eb6853cff3",
+                    "dataset_bae7bf3355a7",
+                ],
+                "metadata": {
+                    "mapView": {
+                        "center": [103.954935, 30.58352],
+                        "height": 4403.56,
+                        "bbox": [103.92842, 30.567549, 103.98145, 30.599486],
+                        "crs": "EPSG:4326",
+                    },
+                    "layers": [
+                        {
+                            "id": "layer_58Xhznd_LAd_zfaP",
+                            "layerId": "layer_58Xhznd_LAd_zfaP",
+                            "datasetId": "dataset_00eb6853cff3",
+                            "name": "机场 空间筛选",
+                            "visible": True,
+                            "opacity": 1,
+                            "geometryType": "Point",
+                            "bbox": [
+                                103.95613648169501,
+                                30.581071264746427,
+                                103.95613648169501,
+                                30.581071264746427,
+                            ],
+                            "dataRef": "storage://normalized/dataset_00eb6853cff3/data.geojson",
+                        }
+                    ],
+                    "activeDatasetIds": [
+                        "sample_airports",
+                        "sample_ports",
+                        "sample_populated_places",
+                        "dataset_f2838ae521d6",
+                        "dataset_00eb6853cff3",
+                        "dataset_bae7bf3355a7",
+                    ],
+                    "clientCapabilities": {
+                        "mapCommands": [
+                            "camera.flyTo",
+                            "layer.addDataset",
+                            "layer.setVisible",
+                            "layer.setOpacity",
+                            "overlay.addMarker",
+                            "map.clearTemporary",
+                        ]
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+            "message.delta",
+            "message.delta",
+            "message.completed",
+        ]
+
+        started = event_payloads(response.text, "tool.started")[0]
+        assert started["data"]["toolName"] == "geoprocess"
+        tool_input = started["data"]["input"]
+        assert tool_input["inputDatasetId"] == "dataset_00eb6853cff3"
+        assert tool_input["operation"] == "buffer"
+        assert tool_input["distance"] == 50000
+        assert tool_input["unit"] == "meters"
+        assert tool_input["processingCRS"] == "EPSG:32648"
+
+        completed = event_payloads(response.text, "tool.completed")[0]
+        output = completed["data"]["output"]
+        assert output["resultDatasetId"].startswith("dataset_")
+        assert output["featureCount"] == 1
+        assert output["geometryType"] == "Polygon"
+        assert len(output["bbox"]) == 4
+        assert output["area"]["unit"] == "square_meters"
+        assert output["area"]["value"] > 7_800_000_000
+        assert output["dataRef"].startswith("storage://normalized/")
+        assert output["lineage"]["operation"] == "buffer"
+        assert output["lineage"]["inputDatasetId"] == "dataset_00eb6853cff3"
+        assert output["lineage"]["distance"] == 50000
+        assert output["lineage"]["unit"] == "meters"
+        assert output["lineage"]["processingCRS"] == "EPSG:32648"
+        assert output["result"]["crs"] == "EPSG:4326"
+        assert "outputCRS" not in output
+        assert "outputCRS" not in output["lineage"]
+
+        layer = event_payloads(response.text, "layer.created")[0]["data"]
+        assert layer["datasetId"] == output["resultDatasetId"]
+        assert layer["geometryType"] == "Polygon"
+        assert layer["dataRef"] == output["dataRef"]
+        map_command = event_payloads(response.text, "map.command")[0]["data"]
+        assert map_command["action"] == "layer.addDataset"
+        assert map_command["datasetId"] == output["resultDatasetId"]
+        assert model_client.tool_results[0]["output"] == output
     finally:
         clear_overrides()
 

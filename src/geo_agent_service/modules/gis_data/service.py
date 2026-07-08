@@ -183,6 +183,10 @@ class GisDatasetService:
             data_ref=normalized_uri,
             source_type="generated",
             has_declared_crs=geodata.crs is not None,
+            lineage={
+                **(metadata or {}),
+                "toolCallId": source_tool_call_id,
+            },
         )
         self.repository.save(
             DatasetRecord(
@@ -258,6 +262,7 @@ class GisDatasetService:
         data_ref: str,
         source_type: DatasetSourceType | GeneratedDatasetSourceType,
         has_declared_crs: bool,
+        lineage: dict[str, object] | None = None,
     ) -> InputDataSummary:
         warnings: list[str] = []
         crs = geodata.crs.to_string() if geodata.crs is not None else None
@@ -287,6 +292,7 @@ class GisDatasetService:
             fields=self._field_summaries(geodata),
             warnings=warnings,
             dataRef=data_ref,
+            lineage=dict(lineage) if lineage else None,
         )
 
     def _geometry_type(self, geodata: gpd.GeoDataFrame) -> GeometryType | None:
