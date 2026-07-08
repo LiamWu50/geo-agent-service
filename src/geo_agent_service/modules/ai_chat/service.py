@@ -83,7 +83,7 @@ class AiChatService:
                     sessionId=session.id,
                     data={
                         "datasets": [
-                            summary.model_dump(mode="json", by_alias=True)
+                            self._data_summary_payload(summary, payload)
                             for summary in session.data_summaries
                             if summary.dataset_id in effective_dataset_ids
                         ],
@@ -177,6 +177,37 @@ class AiChatService:
                         data={"delta": failure_notice},
                     )
                 )
+
+            deterministic_message = self._deterministic_geoprocess_buffer_message(tool_results)
+            if deterministic_message:
+                chunks.append(deterministic_message)
+                yield self._encode_event(
+                    StreamEvent(
+                        type="message.delta",
+                        sessionId=session.id,
+                        messageId=assistant_message.id,
+                        data={"delta": deterministic_message},
+                    )
+                )
+                assistant_message.content = "".join(chunks)
+                assistant_message.status = "completed"
+                session.status = "completed"
+                session.updated_at = datetime.now(UTC).isoformat()
+                self.repository.save(user_id, session)
+                yield self._encode_event(
+                    StreamEvent(
+                        type="message.completed",
+                        sessionId=session.id,
+                        messageId=assistant_message.id,
+                        data={
+                            "message": assistant_message.model_dump(
+                                mode="json",
+                                by_alias=True,
+                            ),
+                        },
+                    )
+                )
+                return
 
             async for chunk in self.model_client.stream_response(
                 messages=self._model_messages(session.messages, session.data_summaries, payload),
@@ -480,6 +511,10 @@ class AiChatService:
             return []
 
         mentioned_ids = self._explicit_dataset_ids(payload.message, available_ids or selected_ids)
+        if self._is_points_in_existing_buffer_plan_request(payload.message.lower()):
+            point_ids = self._population_point_dataset_ids(payload, available_ids or selected_ids)
+            if point_ids or mentioned_ids:
+                return self._dedupe_dataset_ids([*point_ids, *mentioned_ids])
         if mentioned_ids:
             return mentioned_ids
 
@@ -596,6 +631,16 @@ class AiChatService:
             score += 70
         if isinstance(lineage, dict) and lineage.get("operation") == "spatial_filter":
             score += 200
+        if isinstance(lineage, dict) and lineage.get("operation") == "buffer":
+            score += 500
+        if "缓冲" in message or "buffer" in message:
+            if name and ("缓冲" in name or "buffer" in name.lower()):
+                score += 300
+            geometry_type = str(layer.get("geometryType") or "").lower()
+            if geometry_type in {"polygon", "multipolygon"}:
+                score += 250
+            if isinstance(lineage, dict) and lineage.get("operation") == "spatial_filter":
+                score -= 250
         if {"name", "iata_code", "type"}.issubset(field_names):
             score += 150
         if "刚才生成" in message:
@@ -770,10 +815,13 @@ class AiChatService:
         return calls
 
     def _task_type(self, message: str) -> str:
+        if (
+            self._is_result_layer_inspection_request(message)
+            and not self._has_positive_execution_request(message)
+        ):
+            return "result_layer_inspection"
         if self._is_analysis_execution_request(message):
             return "spatial_analysis"
-        if self._is_result_layer_inspection_request(message):
-            return "result_layer_inspection"
         if re.search(
             r"是否适合|能否|判断.*适合|只判断|前提条件|数据准备|不要执行|不要调用",
             message,
@@ -893,6 +941,73 @@ class AiChatService:
                 + "、".join(input_ids)
                 + "，并读取其几何类型、范围、字段和可用性摘要。"
             )
+
+        if self._is_points_in_existing_buffer_plan_request(message):
+            point_dataset_id = self._first_dataset_id_by_geometry(input_ids, "point")
+            mask_dataset_id = self._first_dataset_id_by_geometry(input_ids, "polygon")
+            output_fields = [
+                "NAME",
+                "NAME_ZH",
+                "POP_MAX",
+                "POP2020",
+                "LATITUDE",
+                "LONGITUDE",
+            ]
+            return {
+                "type": "plan.created",
+                "planType": "points_in_polygon_plan",
+                "inputPointDatasetId": point_dataset_id,
+                "maskDatasetId": mask_dataset_id,
+                "predicate": "within",
+                "alternativePredicates": ["intersects"],
+                "outputFields": output_fields,
+                "execute": False,
+                "steps": [
+                    {
+                        "id": "data-prep",
+                        "title": "数据准备",
+                        "kind": "data_preparation",
+                        "description": (
+                            "确认输入点图层 sample_populated_places，"
+                            f"掩膜面图层 {mask_dataset_id or '用户指定缓冲区面图层'}。"
+                        ),
+                        "expectedInputs": input_ids,
+                        "inputPointDatasetId": point_dataset_id,
+                        "maskDatasetId": mask_dataset_id,
+                    },
+                    {
+                        "id": "spatial-relation",
+                        "title": "空间关系设置",
+                        "kind": "deterministic_gis",
+                        "description": "使用 within 或 intersects 查询缓冲区内人口点。",
+                        "toolCandidates": ["within", "intersects", "spatial_join"],
+                        "parameters": {
+                            "predicate": "within",
+                            "alternativePredicates": ["intersects"],
+                        },
+                    },
+                    {
+                        "id": "output-fields",
+                        "title": "字段输出",
+                        "kind": "schema_projection",
+                        "description": (
+                            "输出 NAME、NAME_ZH、POP_MAX、POP2020、LATITUDE、LONGITUDE 等字段。"
+                        ),
+                        "expectedOutputs": output_fields,
+                    },
+                    {
+                        "id": "result-purpose",
+                        "title": "结果用途",
+                        "kind": "visualization_or_report",
+                        "description": "用于识别机场 50km 服务范围内的人口稠密地区。",
+                        "expectedOutputs": ["分析计划", "结构化步骤"],
+                    },
+                ],
+                "constraints": [
+                    "只生成计划，不执行任何工具",
+                    "不生成新图层",
+                ],
+            }
 
         if self._has_any(message, ["缓冲", "buffer"]):
             distance = self._infer_distance(payload.message)
@@ -1056,6 +1171,49 @@ class AiChatService:
             return "m"
         return normalized
 
+    def _is_points_in_existing_buffer_plan_request(self, message: str) -> bool:
+        if not self._has_any(message, ["缓冲区内", "缓冲范围内", "buffer"]):
+            return False
+        if not self._has_any(message, ["人口稠密", "人口点", "populated"]):
+            return False
+        return self._has_any(message, ["查询", "找出", "筛选", "空间筛选", "叠加", "within", "intersects"])
+
+    def _population_point_dataset_ids(
+        self,
+        payload: ChatMessageRequest,
+        available_ids: list[str],
+    ) -> list[str]:
+        if "sample_populated_places" in available_ids:
+            return ["sample_populated_places"]
+        layers = payload.metadata.get("layers")
+        if not isinstance(layers, list):
+            return []
+        matches: list[str] = []
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            dataset_id = str(layer.get("datasetId") or "").strip()
+            name = str(layer.get("name") or "").lower()
+            geometry_type = str(layer.get("geometryType") or "").lower()
+            if dataset_id and geometry_type == "point" and (
+                "人口稠密" in name or "populated" in dataset_id.lower()
+            ):
+                matches.append(dataset_id)
+        return self._dedupe_dataset_ids(matches)
+
+    def _first_dataset_id_by_geometry(
+        self,
+        dataset_ids: list[str],
+        geometry_keyword: str,
+    ) -> str | None:
+        normalized_keyword = geometry_keyword.lower()
+        for dataset_id in dataset_ids:
+            summary = self._summary_for_ranking(dataset_id)
+            geometry_type = str(summary.geometry_type if summary is not None else "").lower()
+            if normalized_keyword in geometry_type:
+                return dataset_id
+        return dataset_ids[0] if dataset_ids else None
+
     def _tool_failure_notice(self, tool_results: list[dict[str, Any]]) -> str:
         failed_calls = [
             result for result in tool_results if result.get("status") == "failed"
@@ -1094,6 +1252,51 @@ class AiChatService:
             "spatial_filter 尚未实现/未执行，不能返回四川省范围内机场的确定性筛选结果。"
             f"工具状态：failed；原因：{error_message}"
         )
+
+    def _deterministic_geoprocess_buffer_message(
+        self,
+        tool_results: list[dict[str, Any]],
+    ) -> str:
+        for result in tool_results:
+            if result.get("toolName") != "geoprocess" or result.get("status") != "completed":
+                continue
+            output = result.get("output")
+            if not isinstance(output, dict):
+                continue
+            lineage = output.get("lineage")
+            if not isinstance(lineage, dict) or lineage.get("operation") != "buffer":
+                continue
+            result_summary = output.get("result")
+            if not isinstance(result_summary, dict):
+                result_summary = {}
+            area = output.get("area")
+            if not isinstance(area, dict):
+                area = {}
+            bbox = output.get("bbox")
+            output_crs = str(result_summary.get("crs") or "未知")
+            processing_crs = str(output.get("processingCRS") or lineage.get("processingCRS") or "")
+            distance = lineage.get("distance") or output.get("distance")
+            result_dataset_id = str(output.get("resultDatasetId") or "")
+            layer_name = str(result_summary.get("name") or "")
+            geometry_type = str(
+                output.get("geometryType") or result_summary.get("geometryType") or ""
+            )
+            area_value = area.get("value")
+            area_unit = str(area.get("unit") or "square_meters")
+            data_ref = str(output.get("dataRef") or result_summary.get("dataRef") or "")
+            return (
+                "缓冲区分析已执行完成。"
+                f"resultDatasetId={result_dataset_id}；"
+                f"图层名称={layer_name}；"
+                f"几何类型={geometry_type}；"
+                f"bbox={bbox}；"
+                f"面积估算={area_value} {area_unit}；"
+                f"dataRef={data_ref}。\n"
+                f"输入点先临时重投影到 {processing_crs} 进行 {distance} 米缓冲计算；"
+                f"结果几何已回写为 {output_crs} GeoJSON，bbox 使用 WGS84 经纬度，"
+                f"面积按 processingCRS={processing_crs} 计算。"
+            )
+        return ""
 
     def _attribute_summary_input(self, base_input: dict[str, Any]) -> dict[str, Any]:
         payload = dict(base_input)
@@ -1518,6 +1721,7 @@ class AiChatService:
             f"本轮意图: {self._task_type(payload.message.lower())}",
         ]
         for index, summary in enumerate(data_summaries, start=1):
+            summary_payload = self._data_summary_payload(summary, payload)
             fields = ", ".join(
                 f"{field.name}({field.type})" for field in summary.fields
             ) or "无属性字段"
@@ -1527,11 +1731,16 @@ class AiChatService:
                     f"   geometryType: {summary.geometry_type}",
                     f"   featureCount: {summary.feature_count}",
                     f"   crs: {summary.crs}",
+                    f"   processingCRS: {summary_payload.get('processingCRS')}",
                     f"   bbox: {summary.bbox}",
+                    f"   area: {summary_payload.get('area')}",
                     f"   fields: {fields}",
                     f"   dataRef: {summary.data_ref}",
                 ]
             )
+            for key in ["sourceDatasetId", "inputDatasetId", "distance", "unit", "toolCallId"]:
+                if key in summary_payload:
+                    lines.append(f"   {key}: {summary_payload[key]}")
             if summary.lineage:
                 lines.append(
                     "   lineage: "
@@ -1634,6 +1843,13 @@ class AiChatService:
         )
 
     def _is_analysis_execution_request(self, message: str) -> bool:
+        if (
+            self._is_result_layer_inspection_request(message)
+            and not self._has_positive_execution_request(message)
+        ):
+            return False
+        if self._user_forbids_tools(message):
+            return False
         strong_execution_terms = [
             "执行",
             "运行",
@@ -1662,11 +1878,85 @@ class AiChatService:
         ]
         if self._has_any(message, strong_execution_terms):
             return self._has_any(message, analysis_terms)
-        if self._is_result_layer_inspection_request(message):
-            return False
         return self._has_any(message, create_terms) and self._has_any(
             message, deterministic_operation_terms
         )
+
+    def _has_positive_execution_request(self, message: str) -> bool:
+        if self._user_forbids_tools(message):
+            return False
+        describes_existing_result = self._has_any(message, ["刚才生成", "刚生成", "生成的"])
+        create_result_request = bool(
+            re.search(r"(生成|创建).*(结果图层|缓冲区|buffer|裁剪|筛选)", message)
+        )
+        return bool(
+            re.search(r"(请|帮我|开始|现在)?\s*(执行|运行)", message)
+            or (create_result_request and not describes_existing_result)
+        )
+
+    def _user_forbids_tools(self, message: str) -> bool:
+        return bool(
+            re.search(
+                r"(不要|不得|禁止|别|不允许)\s*(重新)?\s*(执行|调用|使用).*工具",
+                message,
+            )
+        )
+
+    def _data_summary_payload(
+        self,
+        summary: InputDataSummary,
+        payload: ChatMessageRequest,
+    ) -> dict[str, Any]:
+        data = summary.model_dump(mode="json", by_alias=True)
+        if not self._is_result_layer_inspection_request(payload.message.lower()):
+            return data
+
+        lineage = summary.lineage if isinstance(summary.lineage, dict) else {}
+        for key in [
+            "sourceDatasetId",
+            "inputDatasetId",
+            "distance",
+            "unit",
+            "toolCallId",
+            "processingCRS",
+        ]:
+            if key in lineage and lineage[key] is not None:
+                data[key] = lineage[key]
+
+        area = lineage.get("area")
+        if area is None and lineage.get("operation") == "buffer":
+            area = self._area_from_summary(summary, lineage)
+        if area is not None:
+            data["area"] = area
+        return data
+
+    def _area_from_summary(
+        self,
+        summary: InputDataSummary,
+        lineage: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        processing_crs = str(lineage.get("processingCRS") or "").strip()
+        if not processing_crs:
+            return None
+        if summary.geometry_type not in {"Polygon", "MultiPolygon", "Mixed"}:
+            return None
+        if self.dataset_service is None:
+            return None
+        try:
+            import geopandas as gpd  # type: ignore[import-untyped]
+
+            path = self.dataset_service.resolve_data_ref(summary.data_ref)
+            geodata = gpd.read_file(path)
+            if geodata.empty:
+                return None
+            area = float(geodata.to_crs(processing_crs).geometry.area.sum())
+        except Exception:
+            return None
+        return {
+            "value": area,
+            "unit": "square_meters",
+            "processingCRS": processing_crs,
+        }
 
     def _duration_ms(self, started_at: datetime, finished_at: datetime) -> int:
         return int((finished_at - started_at).total_seconds() * 1000)
