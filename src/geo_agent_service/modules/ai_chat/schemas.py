@@ -28,6 +28,55 @@ class ChatSessionResponse(BaseModel):
     session: AgentSession
 
 
+class AgentRunEvent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    sequence: int
+    type: str
+    payload: dict[str, Any]
+    created_at: str = Field(alias="createdAt")
+
+
+class AgentRun(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    run_id: str = Field(alias="runId")
+    session_id: str = Field(alias="sessionId")
+    user_id: str = Field(alias="userId")
+    status: Literal[
+        "running",
+        "waiting_confirmation",
+        "waiting_clarification",
+        "completed",
+        "failed",
+    ]
+    query: str
+    selected_dataset_ids: list[str] = Field(default_factory=list, alias="selectedDatasetIds")
+    selected_service_ids: list[str] = Field(default_factory=list, alias="selectedServiceIds")
+    intent: dict[str, Any] | None = None
+    data_readiness: dict[str, Any] | None = Field(default=None, alias="dataReadiness")
+    tool_plan: dict[str, Any] | None = Field(default=None, alias="toolPlan")
+    tool_results: list[dict[str, Any]] = Field(default_factory=list, alias="toolResults")
+    errors: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[AgentRunEvent] = Field(default_factory=list)
+    started_at: str = Field(alias="startedAt")
+    finished_at: str | None = Field(default=None, alias="finishedAt")
+    duration_ms: int | None = Field(default=None, alias="durationMs")
+
+
+class AgentRunListResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    runs: list[AgentRun]
+
+
+class AgentRunResponse(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    run: AgentRun
+
+
 class StreamEvent(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -47,6 +96,7 @@ class StreamEvent(BaseModel):
         "done",
     ]
     session_id: str = Field(alias="sessionId")
+    run_id: str | None = Field(default=None, alias="runId")
     message_id: str | None = Field(default=None, alias="messageId")
     tool_call_id: str | None = Field(default=None, alias="toolCallId")
     data: dict[str, Any] = Field(default_factory=dict)

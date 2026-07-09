@@ -6,6 +6,7 @@ import pandas as pd  # type: ignore[import-untyped]
 from pandas.api import types as pandas_types  # type: ignore[import-untyped]
 
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
+from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.base import GisTool, GisToolResult
 
@@ -19,17 +20,23 @@ class AttributeSummaryTool(GisTool):
         *,
         dataset_repository: DatasetRepository,
         storage: GisDataStorage,
+        dataset_service: GisDatasetService | None = None,
     ) -> None:
         self.dataset_repository = dataset_repository
         self.storage = storage
+        self.dataset_service = dataset_service or GisDatasetService(
+            storage=storage,
+            repository=dataset_repository,
+        )
 
     async def run(self, payload: dict[str, Any]) -> GisToolResult:
         dataset_id = self._dataset_id(payload)
-        record = self.dataset_repository.get(dataset_id)
-        if record is None:
+        try:
+            dataset_summary = self.dataset_service.get_dataset(dataset_id)
+        except LookupError:
             raise ValueError(f"Dataset not found: {dataset_id}")
 
-        path = self.storage.resolve_data_ref(record.summary.data_ref)
+        path = self.dataset_service.resolve_data_ref(dataset_summary.data_ref)
         geodata = gpd.read_file(path)
         group_by = self._optional_field(payload.get("groupBy"), geodata)
         sort_by = self._optional_field(payload.get("sortBy"), geodata)
@@ -37,7 +44,7 @@ class AttributeSummaryTool(GisTool):
 
         summary: dict[str, Any] = {
             "datasetId": dataset_id,
-            "name": record.summary.name,
+            "name": dataset_summary.name,
             "featureCount": int(len(geodata)),
             "fields": self._field_statistics(geodata),
         }
@@ -54,7 +61,7 @@ class AttributeSummaryTool(GisTool):
             summary["sortOrder"] = self._sort_order(payload.get("sortOrder"))
             summary["rows"] = self._feature_rows(geodata, sort_by, payload.get("sortOrder"))
 
-        return GisToolResult(data_ref=record.summary.data_ref, summary=summary)
+        return GisToolResult(data_ref=dataset_summary.data_ref, summary=summary)
 
     def _dataset_id(self, payload: dict[str, Any]) -> str:
         dataset_id = payload.get("datasetId")

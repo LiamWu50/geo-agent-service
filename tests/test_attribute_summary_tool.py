@@ -79,3 +79,19 @@ async def test_attribute_summary_sorts_rows_with_array_properties(tmp_path: Path
     rows = result.summary["rows"]
     assert [row["childrenNum"] for row in rows] == [11, 7, 3]
     assert rows[0]["center"] == [105.2, 31.8]
+
+
+async def test_attribute_summary_reads_sample_datasets(tmp_path: Path) -> None:
+    storage = GisDataStorage(tmp_path / "gis")
+    repository = DatasetRepository(storage.metadata_path())
+
+    result = await AttributeSummaryTool(
+        dataset_repository=repository,
+        storage=storage,
+    ).run({"datasetId": "sample_airports"})
+
+    assert result.data_ref == "sample://sample_airports"
+    assert result.summary["datasetId"] == "sample_airports"
+    assert result.summary["name"] == "机场"
+    assert result.summary["featureCount"] == 281
+    assert {field["name"] for field in result.summary["fields"]} >= {"name", "type"}

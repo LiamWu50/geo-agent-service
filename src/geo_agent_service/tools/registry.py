@@ -39,6 +39,7 @@ def create_default_tool_registry(
         AttributeSummaryTool(
             dataset_repository=dataset_repository,
             storage=storage,
+            dataset_service=dataset_service,
         )
     )
     registry.register(GeoprocessTool(dataset_service=dataset_service))

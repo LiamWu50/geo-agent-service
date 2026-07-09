@@ -6,7 +6,13 @@ from fastapi.responses import StreamingResponse
 from geo_agent_service.core.config import settings
 from geo_agent_service.modules.ai_chat.model_client import QwenPlusClient
 from geo_agent_service.modules.ai_chat.repository import AiChatRepository
-from geo_agent_service.modules.ai_chat.schemas import ChatMessageRequest, ChatSessionResponse
+from geo_agent_service.modules.ai_chat.run_repository import AgentRunRepository
+from geo_agent_service.modules.ai_chat.schemas import (
+    AgentRunListResponse,
+    AgentRunResponse,
+    ChatMessageRequest,
+    ChatSessionResponse,
+)
 from geo_agent_service.modules.ai_chat.service import AiChatService
 from geo_agent_service.modules.auth.routes import (
     AuthServiceDependency,
@@ -17,6 +23,7 @@ from geo_agent_service.modules.auth.service import InvalidTokenError
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
 from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
+from geo_agent_service.persistence.database import create_database_engine
 from geo_agent_service.tools.registry import GisToolRegistry, create_default_tool_registry
 
 router = APIRouter(prefix="/ai-chat", tags=["ai-chat"])
@@ -47,11 +54,13 @@ ToolRegistryDependency = Annotated[GisToolRegistry, Depends(get_tool_registry)]
 def get_ai_chat_service(tool_registry: ToolRegistryDependency) -> AiChatService:
     gis_storage = GisDataStorage(settings.gis_storage_root)
     dataset_repository = DatasetRepository(gis_storage.metadata_path())
+    run_repository = AgentRunRepository(create_database_engine())
     return AiChatService(
         repository=AiChatRepository(settings.ai_chat_storage_root),
         dataset_repository=dataset_repository,
         dataset_service=GisDatasetService(storage=gis_storage, repository=dataset_repository),
         tool_registry=tool_registry,
+        run_repository=run_repository,
         model_client=QwenPlusClient(
             api_key=settings.qwen_api_key,
             base_url=settings.qwen_base_url,
@@ -88,3 +97,27 @@ async def get_chat_session(
     if session is None:
         raise HTTPException(status_code=404, detail="Chat session not found.")
     return ChatSessionResponse(session=session)
+
+
+@router.get("/sessions/{session_id}/runs", response_model=AgentRunListResponse)
+async def list_chat_session_runs(
+    session_id: str,
+    user_id: CurrentUserIdDependency,
+    service: AiChatServiceDependency,
+) -> AgentRunListResponse:
+    return AgentRunListResponse(
+        runs=service.list_session_runs(user_id=user_id, session_id=session_id)
+    )
+
+
+@router.get("/sessions/{session_id}/runs/{run_id}", response_model=AgentRunResponse)
+async def get_chat_session_run(
+    session_id: str,
+    run_id: str,
+    user_id: CurrentUserIdDependency,
+    service: AiChatServiceDependency,
+) -> AgentRunResponse:
+    run = service.get_run(user_id=user_id, session_id=session_id, run_id=run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Agent run not found.")
+    return AgentRunResponse(run=run)

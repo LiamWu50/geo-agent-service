@@ -254,7 +254,7 @@ class AiChatToolExecutionMixin:
         if self._has_any(
             message,
             ["统计", "数量", "分类", "占比", "平均", "总和", "求和", "汇总", "summary", "count"],
-        ):
+        ) and not self._is_read_only_metadata_count_query(message):
             if (
                 effective_dataset_ids
                 and "attribute_summary" in self.tool_registry.list_names()
@@ -705,6 +705,27 @@ class AiChatToolExecutionMixin:
                 "geometry",
                 "空间范围",
                 "bbox",
+            ],
+        )
+
+    def _is_read_only_metadata_count_query(self, message: str) -> bool:
+        if not self._is_metadata_query(message):
+            return False
+        if not self._has_any(message, ["要素数量", "featurecount", "feature count"]):
+            return False
+        return not self._has_any(
+            message,
+            [
+                "按",
+                "统计",
+                "分类",
+                "占比",
+                "平均",
+                "总和",
+                "求和",
+                "汇总",
+                "group by",
+                "summary by",
             ],
         )
 

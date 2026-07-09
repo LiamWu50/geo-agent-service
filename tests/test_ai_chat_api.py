@@ -6,14 +6,20 @@ from typing import Any
 import geopandas as gpd  # type: ignore[import-untyped]
 from fastapi.testclient import TestClient
 from shapely.geometry import Point, Polygon  # type: ignore[import-untyped]
+from sqlalchemy import create_engine
 
 from geo_agent_service.core.config import settings
 from geo_agent_service.main import app
 from geo_agent_service.modules.ai_chat.repository import AiChatRepository
 from geo_agent_service.modules.ai_chat.routes import get_ai_chat_service
+from geo_agent_service.modules.ai_chat.run_repository import AgentRunRepository
 from geo_agent_service.modules.ai_chat.service import AiChatService
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
-from geo_agent_service.modules.gis_data.schemas import DatasetRecord, FieldSummary, InputDataSummary
+from geo_agent_service.modules.gis_data.schemas import (
+    DatasetRecord,
+    FieldSummary,
+    InputDataSummary,
+)
 from geo_agent_service.modules.gis_data.service import GisDatasetService
 from geo_agent_service.modules.gis_data.storage import GisDataStorage
 from geo_agent_service.tools.base import GisTool, GisToolResult
@@ -59,7 +65,12 @@ class FailingTool(GisTool):
         raise RuntimeError("tool exploded")
 
 
-def configure_app(tmp_path: Path, *, failing_tool: bool = False) -> None:
+def configure_app(
+    tmp_path: Path,
+    *,
+    failing_tool: bool = False,
+    persist_runs: bool = False,
+) -> None:
     settings.auth_storage_root = str(tmp_path / "auth")
     settings.gis_storage_root = str(tmp_path / "gis")
     settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
@@ -67,17 +78,24 @@ def configure_app(tmp_path: Path, *, failing_tool: bool = False) -> None:
     settings.auth_password = "secret"
     settings.auth_token_secret = "test-secret"
     settings.auth_token_expire_minutes = 60
+    settings.database_url = f"sqlite:///{tmp_path / 'agent-runs.sqlite'}"
 
     def fake_service() -> AiChatService:
         registry = GisToolRegistry()
         registry.register(FailingTool() if failing_tool else EchoTool())
         storage = GisDataStorage(settings.gis_storage_root)
         dataset_repository = DatasetRepository(storage.metadata_path())
+        run_repository = (
+            AgentRunRepository(create_engine(settings.database_url))
+            if persist_runs
+            else None
+        )
         return AiChatService(
             repository=AiChatRepository(settings.ai_chat_storage_root),
             dataset_repository=dataset_repository,
             dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
             tool_registry=registry,
+            run_repository=run_repository,
             model_client=FakeModelClient(),
         )
 
@@ -505,6 +523,118 @@ def test_ai_chat_streams_tool_and_message_events(tmp_path: Path) -> None:
         clear_overrides()
 
 
+def test_ai_chat_persists_completed_run_and_event_log(tmp_path: Path) -> None:
+    configure_app(tmp_path, persist_runs=True)
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_demo/messages",
+            headers=auth_headers(token),
+            json={"message": "hello", "selectedDatasetIds": ["missing_dataset"]},
+        )
+
+        assert response.status_code == 200
+        names = event_names(response.text)
+        summary_event = event_payloads(response.text, "data.summary")[0]
+        run_id = summary_event["runId"]
+
+        runs_response = client.get(
+            "/api/ai-chat/sessions/session_demo/runs",
+            headers=auth_headers(token),
+        )
+        assert runs_response.status_code == 200
+        runs = runs_response.json()["runs"]
+        assert len(runs) == 1
+        assert runs[0]["runId"] == run_id
+        assert runs[0]["status"] == "completed"
+        assert runs[0]["intent"]["task_type"] == "report"
+        assert runs[0]["dataReadiness"]["status"] == "partial"
+        assert runs[0]["dataReadiness"]["missing_dataset_ids"] == ["missing_dataset"]
+
+        run_response = client.get(
+            f"/api/ai-chat/sessions/session_demo/runs/{run_id}",
+            headers=auth_headers(token),
+        )
+        assert run_response.status_code == 200
+        run = run_response.json()["run"]
+        assert [event["type"] for event in run["events"]] == names
+        assert [event["sequence"] for event in run["events"]] == list(
+            range(1, len(names) + 1)
+        )
+        assert run["events"][0]["payload"]["runId"] == run_id
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_persists_failed_run(tmp_path: Path) -> None:
+    configure_app(tmp_path, failing_tool=True, persist_runs=True)
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_demo/messages",
+            headers=auth_headers(token),
+            json={"message": "字段有哪些", "selectedDatasetIds": ["dataset_1"]},
+        )
+
+        assert response.status_code == 200
+        run_id = event_payloads(response.text, "data.summary")[0]["runId"]
+        run_response = client.get(
+            f"/api/ai-chat/sessions/session_demo/runs/{run_id}",
+            headers=auth_headers(token),
+        )
+
+        assert run_response.status_code == 200
+        run = run_response.json()["run"]
+        assert run["status"] == "failed"
+        assert run["toolResults"][0]["status"] == "failed"
+        assert [event["type"] for event in run["events"]] == [
+            "data.summary",
+            "tool.started",
+            "tool.failed",
+            "message.delta",
+            "message.completed",
+        ]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_persists_plan_only_run_state(tmp_path: Path) -> None:
+    configure_app(tmp_path, persist_runs=True)
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_plan/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "生成分析计划，只生成计划，不要执行任何工具。",
+                "selectedDatasetIds": ["dataset_1"],
+            },
+        )
+
+        assert response.status_code == 200
+        run_id = event_payloads(response.text, "data.summary")[0]["runId"]
+        run_response = client.get(
+            f"/api/ai-chat/sessions/session_plan/runs/{run_id}",
+            headers=auth_headers(token),
+        )
+
+        assert run_response.status_code == 200
+        run = run_response.json()["run"]
+        assert run["status"] == "completed"
+        assert run["intent"]["requires_plan_only"] is True
+        assert run["toolPlan"]["execute"] is False
+        assert run["toolPlan"]["reason"] == "plan_only_request"
+        assert "plan.created" in [event["type"] for event in run["events"]]
+    finally:
+        clear_overrides()
+
+
 def test_ai_chat_loads_sample_dataset_summary(tmp_path: Path) -> None:
     configure_app(tmp_path)
     try:
@@ -607,6 +737,93 @@ def test_ai_chat_merges_frontend_sample_layers_with_backend_summaries(tmp_path: 
         assert '"crs": "EPSG:4326"' in system_prompt
         assert '"dataRef": "sample://sample_airports"' in system_prompt
         assert "以 data.summary 为准" in system_prompt
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_selected_layer_metadata_with_feature_count_is_read_only(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    model_client = FakeModelClient()
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=model_client,
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+
+        response = client.post(
+            "/api/ai-chat/sessions/session_selected_metadata/messages",
+            headers=auth_headers(token),
+            json={
+                "message": (
+                    "请说明当前已选图层的数据集 ID、图层 ID、名称、几何类型、"
+                    "CRS、bbox、字段和要素数量"
+                ),
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                ],
+                "metadata": {
+                    "mapView": {"bbox": [-180, -90, 180, 90], "crs": "EPSG:4326"},
+                    "layers": [
+                        {
+                            "id": "layer_sample_airports",
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "bbox": [
+                                -175.135635,
+                                -53.005069825517666,
+                                178.5600483699593,
+                                71.289299,
+                            ],
+                            "dataRef": "dataset:sample_airports",
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert '"toolName": "metadata_search"' in response.text
+        assert '"toolName": "attribute_summary"' not in response.text
+        assert '"type": "error"' not in response.text
+        assert "Dataset not found: sample_airports" not in response.text
+        assert "本轮工具调用失败" not in response.text
+        summary_event = event_payloads(response.text, "data.summary")[0]
+        assert summary_event["data"]["missingDatasetIds"] == []
+        assert summary_event["data"]["datasets"][0]["featureCount"] == 281
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "图层ID=layer_sample_airports" in completed_message
+        assert "数据集ID=sample_airports" in completed_message
+        assert "要素数量=281" in completed_message
+        assert "字段=scalerank" in completed_message
+        assert model_client.messages == []
     finally:
         clear_overrides()
 

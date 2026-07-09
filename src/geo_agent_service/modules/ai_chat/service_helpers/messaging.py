@@ -190,6 +190,71 @@ class AiChatMessagingMixin:
             f"datasetId={dataset_id}；field={field}；" + "；".join(parts) + "。"
         )
 
+    def _deterministic_selected_layer_metadata_message(
+        self,
+        data_summaries: list[InputDataSummary],
+        payload: ChatMessageRequest,
+    ) -> str:
+        message = payload.message.lower()
+        if not self._is_selected_layer_metadata_request(message):
+            return ""
+
+        layers = self._merged_layer_context(payload.metadata.get("layers"), data_summaries)
+        if not layers:
+            layers = [
+                {
+                    "id": None,
+                    "layerId": None,
+                    "datasetId": summary.dataset_id,
+                    "name": summary.name,
+                    "geometryType": summary.geometry_type,
+                    "crs": summary.crs,
+                    "bbox": summary.bbox,
+                    "featureCount": summary.feature_count,
+                }
+                for summary in data_summaries
+            ]
+        if not layers:
+            return ""
+
+        summaries_by_id = {summary.dataset_id: summary for summary in data_summaries}
+        parts = ["当前已选图层信息如下："]
+        for index, layer in enumerate(layers, start=1):
+            dataset_id = str(layer.get("datasetId") or "")
+            summary = summaries_by_id.get(dataset_id)
+            field_names = [field.name for field in summary.fields] if summary else []
+            fields = ", ".join(field_names) if field_names else "无属性字段"
+            parts.append(
+                f"{index}. 图层ID={layer.get('layerId') or layer.get('id') or '未知'}；"
+                f"数据集ID={dataset_id or '未知'}；"
+                f"名称={layer.get('name') or (summary.name if summary else '未知')}；"
+                f"几何类型={layer.get('geometryType') or '未知'}；"
+                f"CRS={layer.get('crs') or '未知'}；"
+                f"bbox={layer.get('bbox') or '未知'}；"
+                f"要素数量={layer.get('featureCount') if layer.get('featureCount') is not None else '未知'}；"
+                f"字段={fields}。"
+            )
+        return "\n".join(parts)
+
+    def _is_selected_layer_metadata_request(self, message: str) -> bool:
+        selected_terms = ["当前已选", "已选", "选中", "selected"]
+        metadata_terms = [
+            "数据集 id",
+            "dataset id",
+            "图层 id",
+            "layer id",
+            "几何类型",
+            "crs",
+            "bbox",
+            "字段",
+            "要素数量",
+            "featurecount",
+            "feature count",
+        ]
+        return any(term in message for term in selected_terms) and any(
+            term in message for term in metadata_terms
+        )
+
     def _get_or_create_session(
         self,
         *,
