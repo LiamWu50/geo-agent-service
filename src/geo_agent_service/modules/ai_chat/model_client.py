@@ -86,7 +86,17 @@ class QwenPlusClient:
                     "max_tokens": self.max_output_tokens,
                 },
             ) as response:
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    detail = await response.aread()
+                    body = detail.decode("utf-8", errors="replace").strip()
+                    if len(body) > 1000:
+                        body = body[:1000] + "..."
+                    message = str(exc)
+                    if body:
+                        message = f"{message}\nResponse body: {body}"
+                    raise RuntimeError(message) from exc
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):
                         continue

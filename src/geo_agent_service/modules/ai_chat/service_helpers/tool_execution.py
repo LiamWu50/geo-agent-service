@@ -738,6 +738,8 @@ class AiChatToolExecutionMixin:
         )
 
     def _is_spatial_filter_request(self, message: str) -> bool:
+        if self._user_forbids_tools(message):
+            return False
         if self._is_attribute_summary_request(message):
             return False
         if not self._has_any(

@@ -190,6 +190,70 @@ class AiChatMessagingMixin:
             f"datasetId={dataset_id}；field={field}；" + "；".join(parts) + "。"
         )
 
+    def _deterministic_spatial_filter_message(
+        self,
+        tool_results: list[dict[str, Any]],
+    ) -> str:
+        completed = [
+            result
+            for result in tool_results
+            if result.get("toolName") == "spatial_filter"
+            and result.get("status") == "completed"
+        ]
+        if len(completed) != 1:
+            return ""
+
+        result = completed[0]
+        raw_output = result.get("output")
+        output: dict[str, Any] = raw_output if isinstance(raw_output, dict) else {}
+        raw_summary = output.get("summary")
+        summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
+        rows_source = output.get("rows")
+        rows = rows_source if isinstance(rows_source, list) else summary.get("rows")
+        if not isinstance(rows, list):
+            rows = []
+
+        result_dataset_id = str(
+            output.get("resultDatasetId") or summary.get("resultDatasetId") or ""
+        )
+        feature_count = output.get("featureCount")
+        if feature_count is None:
+            feature_count = summary.get("featureCount")
+        predicate = str(summary.get("predicate") or "")
+        input_dataset_id = str(summary.get("inputDatasetId") or "")
+        mask_dataset_id = str(summary.get("maskDatasetId") or "")
+        output_fields_source = summary.get("outputFields")
+        output_fields = (
+            [str(field) for field in output_fields_source]
+            if isinstance(output_fields_source, list)
+            else []
+        )
+
+        lines = [
+            "已执行确定性 GIS 工具 spatial_filter。",
+            f"输入点图层={input_dataset_id or '未知'}；"
+            f"掩膜面图层={mask_dataset_id or '未知'}；"
+            f"空间关系={predicate or '未知'}；"
+            f"结果要素数量={feature_count if feature_count is not None else '未知'}；"
+            f"resultDatasetId={result_dataset_id or '未知'}。",
+        ]
+        if output_fields:
+            lines.append("输出字段：" + "、".join(output_fields) + "。")
+
+        if rows:
+            lines.append("筛选结果：")
+            for index, row in enumerate(rows, start=1):
+                if not isinstance(row, dict):
+                    continue
+                rendered = []
+                for field in output_fields or row.keys():
+                    key = str(field)
+                    rendered.append(f"{key}={row.get(key)}")
+                lines.append(f"{index}. " + "；".join(rendered) + "。")
+        else:
+            lines.append("本次筛选未命中任何要素。")
+        return "\n".join(lines)
+
     def _deterministic_selected_layer_metadata_message(
         self,
         data_summaries: list[InputDataSummary],
@@ -234,6 +298,70 @@ class AiChatMessagingMixin:
                 f"要素数量={layer.get('featureCount') if layer.get('featureCount') is not None else '未知'}；"
                 f"字段={fields}。"
             )
+        return "\n".join(parts)
+
+    def _deterministic_data_readiness_message(
+        self,
+        data_summaries: list[InputDataSummary],
+        payload: ChatMessageRequest,
+    ) -> str:
+        if self._task_type(payload.message.lower()) != "data_readiness":
+            return ""
+        if not data_summaries:
+            return "当前没有可读取的数据摘要，无法判断这些图层是否适合后续分析。"
+
+        point_layers = [
+            summary
+            for summary in data_summaries
+            if summary.geometry_type in {"Point", "MultiPoint"}
+        ]
+        polygon_layers = [
+            summary
+            for summary in data_summaries
+            if summary.geometry_type in {"Polygon", "MultiPolygon", "Mixed"}
+        ]
+        crs_values = {summary.crs for summary in data_summaries if summary.crs}
+        same_crs = len(crs_values) == 1
+
+        parts = ["已按本轮指令只检查以下数据集，未执行筛选，也未生成新图层："]
+        for index, summary in enumerate(data_summaries, start=1):
+            field_names = ", ".join(field.name for field in summary.fields[:8])
+            parts.append(
+                f"{index}. {summary.dataset_id}（{summary.name}）："
+                f"geometryType={summary.geometry_type}；CRS={summary.crs or '未知'}；"
+                f"featureCount={summary.feature_count}；bbox={summary.bbox}；"
+                f"字段={field_names or '无'}。"
+            )
+
+        if point_layers and polygon_layers and same_crs:
+            parts.append(
+                "判断：这两个图层适合用于“四川省内机场筛选”的准备条件检查。"
+                f"{point_layers[0].dataset_id} 是点图层，"
+                f"{polygon_layers[0].dataset_id} 是面图层，且 CRS 一致；"
+                "后续如果用户明确要求执行筛选，可用面图层作为范围掩膜、点图层作为输入点。"
+            )
+        else:
+            reasons: list[str] = []
+            if not point_layers:
+                reasons.append("缺少点图层")
+            if not polygon_layers:
+                reasons.append("缺少面图层")
+            if not same_crs:
+                reasons.append("CRS 不一致或缺失")
+            parts.append(
+                "判断：当前图层还不完全满足空间筛选准备条件；"
+                + "；".join(reasons)
+                + "。"
+            )
+
+        warnings = [
+            warning
+            for summary in data_summaries
+            for warning in summary.warnings
+            if warning
+        ]
+        if warnings:
+            parts.append("注意：" + "；".join(dict.fromkeys(warnings)) + "。")
         return "\n".join(parts)
 
     def _is_selected_layer_metadata_request(self, message: str) -> bool:

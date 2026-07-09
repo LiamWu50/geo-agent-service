@@ -1187,6 +1187,7 @@ def test_ai_chat_readiness_only_narrows_datasets_and_blocks_geoprocess(
     settings.auth_token_expire_minutes = 60
     storage = GisDataStorage(settings.gis_storage_root)
     write_sichuan_dataset(storage)
+    model_client = FakeModelClient()
 
     def fake_service() -> AiChatService:
         dataset_repository = DatasetRepository(storage.metadata_path())
@@ -1198,7 +1199,7 @@ def test_ai_chat_readiness_only_narrows_datasets_and_blocks_geoprocess(
                 dataset_repository=dataset_repository,
                 storage=storage,
             ),
-            model_client=FakeModelClient(),
+            model_client=model_client,
         )
 
     app.dependency_overrides[get_ai_chat_service] = fake_service
@@ -1246,7 +1247,6 @@ def test_ai_chat_readiness_only_narrows_datasets_and_blocks_geoprocess(
             "tool.started",
             "tool.completed",
             "message.delta",
-            "message.delta",
             "message.completed",
         ]
 
@@ -1279,6 +1279,9 @@ def test_ai_chat_readiness_only_narrows_datasets_and_blocks_geoprocess(
         assert [event["data"]["toolName"] for event in started_events] == [
             "metadata_search"
         ]
+        assert '"toolName": "spatial_filter"' not in response.text
+        assert event_payloads(response.text, "layer.created") == []
+        assert event_payloads(response.text, "map.command") == []
         metadata_input = started_events[0]["data"]["input"]
         assert metadata_input["datasetIds"] == [
             "dataset_f2838ae521d6",
@@ -1290,6 +1293,8 @@ def test_ai_chat_readiness_only_narrows_datasets_and_blocks_geoprocess(
         ]
         assert '"operation": "attribute_filter"' not in response.text
         assert '"toolName": "geoprocess"' not in response.text
+        assert "未执行筛选" in response.text
+        assert model_client.messages == []
     finally:
         clear_overrides()
 
@@ -1764,7 +1769,6 @@ def test_ai_chat_spatial_filter_emits_completed_audit_and_result_layer(
             "layer.created",
             "map.command",
             "message.delta",
-            "message.delta",
             "message.completed",
         ]
 
@@ -1801,12 +1805,14 @@ def test_ai_chat_spatial_filter_emits_completed_audit_and_result_layer(
         completed_message = event_payloads(response.text, "message.completed")[0]["data"][
             "message"
         ]["content"]
+        assert "已执行确定性 GIS 工具 spatial_filter" in completed_message
+        assert "name=Chengdushuang Liu" in completed_message
+        assert "iata_code=CTU" in completed_message
+        assert "type=major" in completed_message
         assert "spatial_filter 尚未实现/未执行" not in completed_message
         assert "16" not in completed_message
         assert "status=success" not in completed_message
-        assert len(model_client.tool_results) == 1
-        assert model_client.tool_results[0]["toolName"] == "spatial_filter"
-        assert model_client.tool_results[0]["output"]["rows"] == output["rows"]
+        assert model_client.tool_results == []
     finally:
         clear_overrides()
 
@@ -1908,7 +1914,6 @@ def test_ai_chat_executes_population_points_within_existing_buffer_with_spatial_
             "layer.created",
             "map.command",
             "message.delta",
-            "message.delta",
             "message.completed",
         ]
         assert '"toolName": "attribute_summary"' not in response.text
@@ -1947,11 +1952,12 @@ def test_ai_chat_executes_population_points_within_existing_buffer_with_spatial_
         assert layer["metadata"]["operation"] == "spatial_filter"
         map_command = event_payloads(response.text, "map.command")[0]["data"]
         assert map_command["datasetId"] == output["resultDatasetId"]
-        assert model_client.tool_results[0]["toolName"] == "spatial_filter"
-        assert model_client.tool_results[0]["status"] == "completed"
-        assert model_client.tool_results[0]["output"]["resultDatasetId"] == output[
-            "resultDatasetId"
-        ]
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "已执行确定性 GIS 工具 spatial_filter" in completed_message
+        assert f"resultDatasetId={output['resultDatasetId']}" in completed_message
+        assert model_client.tool_results == []
     finally:
         clear_overrides()
 

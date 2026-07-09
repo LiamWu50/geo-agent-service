@@ -360,8 +360,13 @@ class AiChatService(
 
         deterministic_message = self._deterministic_attribute_summary_message(
             tool_results
+        ) or self._deterministic_spatial_filter_message(
+            tool_results
         ) or self._deterministic_geoprocess_buffer_message(
             tool_results
+        ) or self._deterministic_data_readiness_message(
+            session.data_summaries,
+            payload,
         ) or self._deterministic_selected_layer_metadata_message(
             session.data_summaries,
             payload,

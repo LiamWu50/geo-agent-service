@@ -639,9 +639,22 @@ class AiChatIntentAndPlanMixin:
         )
 
     def _user_forbids_tools(self, message: str) -> bool:
+        forbidden_action = r"(不要|不得|禁止|别|不允许|无需|不需要)"
+        operation = (
+            r"(工具|tool|spatial_filter|attribute_filter|geoprocess|"
+            r"筛选|过滤|空间筛选|空间过滤|缓冲|裁剪|分析)"
+        )
         return bool(
             re.search(
-                r"(不要|不得|禁止|别|不允许)\s*(重新)?\s*(执行|调用|使用).*工具",
+                forbidden_action
+                + r"\s*(重新)?\s*(执行|调用|使用|生成|创建).{0,16}"
+                + operation,
+                message,
+            )
+            or re.search(
+                forbidden_action
+                + r".{0,16}(执行|调用|使用|生成|创建)\s*(任何)?\s*"
+                + operation,
                 message,
             )
         )
