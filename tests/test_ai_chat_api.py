@@ -2300,7 +2300,6 @@ def test_ai_chat_result_layer_inspection_is_read_only_and_uses_lineage(
         assert event_names(inspect_response.text) == [
             "data.summary",
             "message.delta",
-            "message.delta",
             "message.completed",
         ]
         assert event_payloads(inspect_response.text, "tool.started") == []
@@ -2323,14 +2322,18 @@ def test_ai_chat_result_layer_inspection_is_read_only_and_uses_lineage(
         persisted_result = DatasetRepository(storage.metadata_path()).get(result_dataset_id)
         assert persisted_result is not None
         assert persisted_result.summary.lineage == summary_datasets[0]["lineage"]
-        assert "layer_58Xhznd_LAd_zfaP" in model_client.messages[0]["content"]
-        assert "lineage" in model_client.messages[0]["content"]
-        assert "sample_airports" in model_client.messages[0]["content"]
-        assert "dataset_f2838ae521d6" in model_client.messages[0]["content"]
-        assert stale_summary.dataset_id not in model_client.messages[0]["content"]
-        assert "点位严格位于多边形内部" in model_client.messages[0]["content"]
-        assert "不要用“应为”“可能是”等推测语气" in model_client.messages[0]["content"]
-        assert "result_layer_inspection" in model_client.messages[0]["content"]
+        completed_message = event_payloads(inspect_response.text, "message.completed")[0][
+            "data"
+        ]["message"]["content"]
+        assert "当前结果图层信息如下" in completed_message
+        assert "图层ID=layer_58Xhznd_LAd_zfaP" in completed_message
+        assert f"数据集ID={result_dataset_id}" in completed_message
+        assert "来源输入图层=sample_airports" in completed_message
+        assert "掩膜图层=dataset_f2838ae521d6" in completed_message
+        assert "空间关系=within" in completed_message
+        assert "可继续作为后续分析输入" in completed_message
+        assert stale_summary.dataset_id not in completed_message
+        assert model_client.messages == []
         assert model_client.tool_results == []
     finally:
         clear_overrides()
@@ -2461,7 +2464,6 @@ def test_ai_chat_buffer_result_metadata_query_is_read_only_and_targets_visible_p
         assert event_names(response.text) == [
             "data.summary",
             "message.delta",
-            "message.delta",
             "message.completed",
         ]
         assert event_payloads(response.text, "tool.started") == []
@@ -2490,9 +2492,17 @@ def test_ai_chat_buffer_result_metadata_query_is_read_only_and_targets_visible_p
         assert dataset["unit"] == "meters"
         assert dataset["toolCallId"] == "tool_visible_buffer"
         assert dataset["lineage"]["toolCallId"] == "tool_visible_buffer"
-        assert "result_layer_inspection" in model_client.messages[0]["content"]
-        assert "tool_visible_buffer" in model_client.messages[0]["content"]
-        assert "tool_failed" not in model_client.messages[0]["content"]
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert "当前结果图层信息如下" in completed_message
+        assert "图层ID=layer_4AOG4vg_N9bOy_DF" in completed_message
+        assert "来源输入图层=dataset_00eb6853cff3" in completed_message
+        assert "processingCRS=EPSG:32648" in completed_message
+        assert "缓冲距离=50000" in completed_message
+        assert "工具调用ID=tool_visible_buffer" in completed_message
+        assert "tool_failed" not in completed_message
+        assert model_client.messages == []
         assert model_client.tool_results == []
     finally:
         clear_overrides()

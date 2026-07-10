@@ -32,6 +32,7 @@ class AiChatMessagingMixin:
             summary: InputDataSummary,
             payload: ChatMessageRequest,
         ) -> dict[str, Any]: ...
+        def _is_result_layer_inspection_request(self, message: str) -> bool: ...
 
     def _tool_failure_message(self, tool_results: list[dict[str, Any]]) -> str:
         failed_calls = [
@@ -282,12 +283,49 @@ class AiChatMessagingMixin:
             return ""
 
         summaries_by_id = {summary.dataset_id: summary for summary in data_summaries}
-        parts = ["当前已选图层信息如下："]
+        result_inspection = self._is_result_layer_inspection_request(message)
+        parts = [
+            (
+                "当前结果图层信息如下："
+                if result_inspection
+                else "当前已选图层信息如下："
+            )
+        ]
         for index, layer in enumerate(layers, start=1):
             dataset_id = str(layer.get("datasetId") or "")
             summary = summaries_by_id.get(dataset_id)
             field_names = [field.name for field in summary.fields] if summary else []
             fields = ", ".join(field_names) if field_names else "无属性字段"
+            summary_payload = (
+                self._data_summary_payload(summary, payload) if summary is not None else {}
+            )
+            lineage = summary.lineage if summary and isinstance(summary.lineage, dict) else {}
+            source_dataset_id = summary_payload.get("sourceDatasetId") or summary_payload.get(
+                "inputDatasetId"
+            )
+            mask_dataset_id = lineage.get("maskDatasetId")
+            predicate = lineage.get("predicate")
+            operation = lineage.get("operation")
+            tool_call_id = summary_payload.get("toolCallId")
+            extras: list[str] = []
+            if source_dataset_id:
+                extras.append(f"来源输入图层={source_dataset_id}")
+            if mask_dataset_id:
+                extras.append(f"掩膜图层={mask_dataset_id}")
+            if operation:
+                extras.append(f"来源操作={operation}")
+            if predicate:
+                extras.append(f"空间关系={predicate}")
+            if summary_payload.get("processingCRS"):
+                extras.append(f"processingCRS={summary_payload['processingCRS']}")
+            if summary_payload.get("area") is not None:
+                extras.append(f"面积={summary_payload['area']}")
+            if summary_payload.get("distance") is not None:
+                extras.append(f"缓冲距离={summary_payload['distance']}")
+            if summary_payload.get("unit") is not None:
+                extras.append(f"单位={summary_payload['unit']}")
+            if tool_call_id:
+                extras.append(f"工具调用ID={tool_call_id}")
             parts.append(
                 f"{index}. 图层ID={layer.get('layerId') or layer.get('id') or '未知'}；"
                 f"数据集ID={dataset_id or '未知'}；"
@@ -296,7 +334,15 @@ class AiChatMessagingMixin:
                 f"CRS={layer.get('crs') or '未知'}；"
                 f"bbox={layer.get('bbox') or '未知'}；"
                 f"要素数量={layer.get('featureCount') if layer.get('featureCount') is not None else '未知'}；"
-                f"字段={fields}。"
+                f"字段={fields}"
+                + (f"；{'；'.join(extras)}" if extras else "")
+                + "。"
+            )
+        if result_inspection:
+            parts.append(
+                "判断：该结果图层已有数据集 ID、几何类型、bbox 和要素数量，"
+                "可继续作为后续分析输入；若后续涉及距离、面积或叠加分析，"
+                "应优先确认 CRS/processingCRS 与目标工具要求一致。"
             )
         return "\n".join(parts)
 
@@ -368,20 +414,29 @@ class AiChatMessagingMixin:
         selected_terms = ["当前已选", "已选", "选中", "selected"]
         metadata_terms = [
             "数据集 id",
+            "数据集id",
             "dataset id",
             "图层 id",
+            "图层id",
             "layer id",
             "几何类型",
             "crs",
             "bbox",
             "字段",
             "要素数量",
+            "来源输入图层",
+            "空间关系",
+            "是否可以继续",
+            "继续用于",
+            "后续分析",
             "featurecount",
             "feature count",
         ]
-        return any(term in message for term in selected_terms) and any(
+        if any(term in message for term in selected_terms) and any(
             term in message for term in metadata_terms
-        )
+        ):
+            return True
+        return self._is_result_layer_inspection_request(message)
 
     def _get_or_create_session(
         self,
