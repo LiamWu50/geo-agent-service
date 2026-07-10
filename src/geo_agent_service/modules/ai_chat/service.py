@@ -148,6 +148,10 @@ class AiChatService(
         )
         session.messages.extend([user_message, assistant_message])
         session.status = "running"
+        self._hydrate_session_plan_payloads_from_runs(
+            user_id=state.user_id,
+            session=session,
+        )
         effective_dataset_ids = self._effective_dataset_ids(payload, session)
         available_dataset_ids = self._available_dataset_ids(payload)
         session.selected_dataset_ids = effective_dataset_ids
@@ -250,6 +254,9 @@ class AiChatService(
             return state
 
         plan_payload = self._plan_created_payload(session, payload)
+        session.plan_payloads.append(plan_payload)
+        session.updated_at = datetime.now(UTC).isoformat()
+        self.repository.save(state.user_id, session)
         state.tool_plan = ToolPlan(
             execute=False,
             reason="plan_only_request",
@@ -510,6 +517,52 @@ class AiChatService(
         if self.run_repository is None:
             return
         self.run_repository.fail_run(run_id=run_id, errors=[error])
+
+    def _hydrate_session_plan_payloads_from_runs(
+        self,
+        *,
+        user_id: str,
+        session: AgentSession,
+    ) -> None:
+        if self.run_repository is None:
+            return
+        seen = {
+            self._stable_plan_payload_key(plan_payload)
+            for plan_payload in session.plan_payloads
+            if isinstance(plan_payload, dict)
+        }
+        recovered: list[dict[str, object]] = []
+        for run in self.run_repository.list_session_runs(
+            user_id=user_id,
+            session_id=session.id,
+        ):
+            run_with_events = self.run_repository.get_run(run_id=run.id)
+            if run_with_events is None:
+                continue
+            for event in run_with_events.events:
+                if event.type != "plan.created":
+                    continue
+                payload = event.payload.get("data")
+                if not isinstance(payload, dict):
+                    continue
+                key = self._stable_plan_payload_key(payload)
+                if key in seen:
+                    continue
+                recovered.append(payload)
+                seen.add(key)
+        if recovered:
+            session.plan_payloads.extend(recovered)
+
+    def _stable_plan_payload_key(self, plan_payload: dict[str, object]) -> str:
+        return "|".join(
+            [
+                str(plan_payload.get("type") or ""),
+                str(plan_payload.get("planType") or ""),
+                str(plan_payload.get("targetDatasetId") or ""),
+                str(plan_payload.get("distance") or ""),
+                str(plan_payload.get("unit") or ""),
+            ]
+        )
 
     def get_session(self, *, user_id: str, session_id: str) -> AgentSession | None:
         return self.repository.get(user_id, session_id)

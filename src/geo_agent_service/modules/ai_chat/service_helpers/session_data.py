@@ -17,13 +17,17 @@ class AiChatSessionDataMixin:
         dataset_service: GisDatasetService | None
 
         def _is_points_in_existing_buffer_plan_request(self, message: str) -> bool: ...
+        def _is_plan_only_request(self, message: str) -> bool: ...
         def _population_point_dataset_ids(
             self,
             payload: ChatMessageRequest,
             available_ids: list[str],
         ) -> list[str]: ...
+        def _summary_for_ranking(self, dataset_id: str) -> InputDataSummary | None: ...
+        def _record_created_at_timestamp(self, dataset_id: str) -> float: ...
         def _is_map_display_request(self, message: str) -> bool: ...
         def _is_result_layer_inspection_request(self, message: str) -> bool: ...
+        def _is_analysis_execution_request(self, message: str) -> bool: ...
         def _has_any(self, text: str, needles: list[str]) -> bool: ...
 
     def _load_data_summaries(
@@ -137,8 +141,13 @@ class AiChatSessionDataMixin:
         mentioned_ids = self._explicit_dataset_ids(payload.message, available_ids or selected_ids)
         if self._is_points_in_existing_buffer_plan_request(payload.message.lower()):
             point_ids = self._population_point_dataset_ids(payload, available_ids or selected_ids)
-            if point_ids or mentioned_ids:
-                return self._dedupe_dataset_ids([*point_ids, *mentioned_ids])
+            mask_ids = self._buffer_mask_dataset_ids(
+                payload,
+                available_ids or selected_ids,
+                session,
+            )
+            if point_ids or mask_ids or mentioned_ids:
+                return self._dedupe_dataset_ids([*point_ids, *mask_ids, *mentioned_ids])
         if mentioned_ids:
             return mentioned_ids
 
@@ -147,12 +156,126 @@ class AiChatSessionDataMixin:
             if layer_dataset_ids:
                 return layer_dataset_ids
 
-        if self._is_result_layer_inspection_request(payload.message.lower()):
+        if (
+            self._is_result_layer_inspection_request(payload.message.lower())
+            and not self._is_analysis_execution_request(payload.message.lower())
+        ):
             layer_dataset_ids = self._layer_inspection_dataset_ids(payload, session)
             if layer_dataset_ids:
                 return layer_dataset_ids
 
+        if self._is_existing_result_buffer_request(payload.message.lower()):
+            result_ids = self._existing_spatial_filter_result_dataset_ids(payload, session)
+            if result_ids:
+                return result_ids[:1]
+
         return selected_ids
+
+    def _buffer_mask_dataset_ids(
+        self,
+        payload: ChatMessageRequest,
+        available_ids: list[str],
+        session: AgentSession,
+    ) -> list[str]:
+        layers = payload.metadata.get("layers")
+        message = payload.message.lower()
+        available_set = set(available_ids)
+        selected_positions = {
+            dataset_id: index for index, dataset_id in enumerate(payload.selected_dataset_ids)
+        }
+        candidates: list[tuple[float, int, str]] = []
+
+        if isinstance(layers, list):
+            for layer_index, layer in enumerate(layers):
+                if not isinstance(layer, dict):
+                    continue
+                dataset_id = str(layer.get("datasetId") or "").strip()
+                if not dataset_id or (available_set and dataset_id not in available_set):
+                    continue
+                name = str(layer.get("name") or "").strip()
+                layer_id = str(layer.get("layerId") or layer.get("id") or "").strip()
+                score = self._buffer_mask_candidate_score(
+                    message=message,
+                    dataset_id=dataset_id,
+                    name=name,
+                    layer_id=layer_id,
+                    geometry_type=str(layer.get("geometryType") or ""),
+                    visible=bool(layer.get("visible")),
+                    selected_positions=selected_positions,
+                    session=session,
+                )
+                if score > 0:
+                    candidates.append((score, -layer_index, dataset_id))
+
+        if not candidates:
+            for index, dataset_id in enumerate(available_ids):
+                summary = self._summary_for_ranking(dataset_id)
+                if summary is None:
+                    continue
+                score = self._buffer_mask_candidate_score(
+                    message=message,
+                    dataset_id=dataset_id,
+                    name=summary.name,
+                    layer_id="",
+                    geometry_type=str(summary.geometry_type or ""),
+                    visible=False,
+                    selected_positions=selected_positions,
+                    session=session,
+                )
+                if score > 0:
+                    candidates.append((score, -index, dataset_id))
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return self._dedupe_dataset_ids([dataset_id for _, _, dataset_id in candidates])[:1]
+
+    def _buffer_mask_candidate_score(
+        self,
+        *,
+        message: str,
+        dataset_id: str,
+        name: str,
+        layer_id: str,
+        geometry_type: str,
+        visible: bool,
+        selected_positions: dict[str, int],
+        session: AgentSession,
+    ) -> float:
+        summary = self._summary_for_ranking(dataset_id)
+        lineage = None if summary is None else summary.lineage
+        lineage = lineage or self._lineage_from_tool_calls(dataset_id, session.tool_calls)
+        normalized_geometry = geometry_type.lower()
+        if not normalized_geometry and summary is not None:
+            normalized_geometry = str(summary.geometry_type or "").lower()
+        if normalized_geometry not in {"polygon", "multipolygon"}:
+            return 0.0
+
+        operation = lineage.get("operation") if isinstance(lineage, dict) else None
+        normalized_name = name.lower()
+        score = 0.0
+        if dataset_id.lower() in message:
+            score += 10000
+        if layer_id and layer_id.lower() in message:
+            score += 9000
+        if normalized_name and normalized_name in message:
+            score += 5000
+        if "刚才生成" in message or "生成的" in message or "结果图层" in message:
+            if operation == "buffer":
+                score += 1200
+            if "缓冲" in normalized_name or "buffer" in normalized_name:
+                score += 1000
+            if summary is not None and summary.source_type == "generated":
+                score += 500
+            score += self._record_created_at_timestamp(dataset_id) / 10_000_000_000_000
+        if "机场" in message and "机场" in name:
+            score += 300
+        if "空间筛选" in name:
+            score += 200
+        if visible:
+            score += 100
+        if dataset_id in selected_positions:
+            score += 50
+            score -= selected_positions[dataset_id] * 0.001
+        return score
 
     def _layer_inspection_dataset_ids(
         self,
@@ -218,6 +341,354 @@ class AiChatSessionDataMixin:
         ):
             return True
         return False
+
+    def _is_existing_result_buffer_plan_request(self, message: str) -> bool:
+        if not self._is_plan_only_request(message):
+            return False
+        return self._is_existing_result_buffer_request(message)
+
+    def _is_existing_result_buffer_request(self, message: str) -> bool:
+        if not self._has_any(message, ["缓冲", "buffer"]):
+            return False
+        if not self._has_any(message, ["刚才生成", "刚生成", "生成的", "结果图层"]):
+            return False
+        return self._has_any(message, ["空间筛选", "筛选结果", "机场", "result layer"])
+
+    def _existing_spatial_filter_result_dataset_ids(
+        self,
+        payload: ChatMessageRequest,
+        session: AgentSession,
+    ) -> list[str]:
+        plan_target_ids = self._recent_buffer_plan_target_dataset_ids(
+            payload.message.lower(),
+            session,
+        )
+        if plan_target_ids:
+            return plan_target_ids
+
+        layers = payload.metadata.get("layers")
+        if not isinstance(layers, list):
+            return self._historical_spatial_filter_result_dataset_ids(
+                payload.message.lower(),
+                session,
+            )
+
+        message = payload.message.lower()
+        selected_positions = {
+            dataset_id: index for index, dataset_id in enumerate(payload.selected_dataset_ids)
+        }
+        candidates: list[tuple[float, int, str]] = []
+        for layer_index, layer in enumerate(layers):
+            if not isinstance(layer, dict):
+                continue
+            dataset_id = str(layer.get("datasetId") or "").strip()
+            if not dataset_id:
+                continue
+            name = str(layer.get("name") or "").strip()
+            layer_id = str(layer.get("layerId") or layer.get("id") or "").strip()
+            if not self._is_existing_spatial_filter_result_candidate(
+                message=message,
+                layer=layer,
+                dataset_id=dataset_id,
+                name=name,
+                layer_id=layer_id,
+                session=session,
+            ):
+                continue
+            candidates.append(
+                (
+                    self._existing_spatial_filter_result_score(
+                        message=message,
+                        layer=layer,
+                        dataset_id=dataset_id,
+                        name=name,
+                        layer_id=layer_id,
+                        selected_positions=selected_positions,
+                        session=session,
+                    ),
+                    -layer_index,
+                    dataset_id,
+                )
+            )
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        dataset_ids = self._dedupe_dataset_ids(
+            [dataset_id for _, _, dataset_id in candidates]
+        )
+        if dataset_ids:
+            return dataset_ids
+        return self._historical_spatial_filter_result_dataset_ids(message, session)
+
+    def _recent_buffer_plan_target_dataset_ids(
+        self,
+        message: str,
+        session: AgentSession,
+    ) -> list[str]:
+        if not self._has_any(message, ["刚才", "刚生成", "刚才的", "计划", "plan"]):
+            return []
+        candidates: list[str] = []
+        for plan_payload in reversed(session.plan_payloads):
+            if not isinstance(plan_payload, dict):
+                continue
+            if plan_payload.get("planType") != "buffer_analysis":
+                continue
+            dataset_id = str(plan_payload.get("targetDatasetId") or "").strip()
+            if not dataset_id:
+                continue
+            if self._summary_for_ranking(dataset_id) is None:
+                continue
+            candidates.append(dataset_id)
+            break
+        return self._dedupe_dataset_ids(candidates)
+
+    def _historical_spatial_filter_result_dataset_ids(
+        self,
+        message: str,
+        session: AgentSession,
+    ) -> list[str]:
+        candidates: list[tuple[float, int, str]] = []
+        seen: set[str] = set()
+        for recency, tool_call in enumerate(reversed(session.tool_calls)):
+            if tool_call.status != "completed" or tool_call.tool_name != "spatial_filter":
+                continue
+            output = tool_call.output if isinstance(tool_call.output, dict) else {}
+            summary_payload = (
+                output.get("summary") if isinstance(output.get("summary"), dict) else output
+            )
+            if not isinstance(summary_payload, dict):
+                continue
+            dataset_id = str(
+                summary_payload.get("resultDatasetId")
+                or output.get("resultDatasetId")
+                or ""
+            ).strip()
+            if not dataset_id or dataset_id in seen:
+                continue
+            summary = self._summary_for_ranking(dataset_id)
+            if not self._is_historical_spatial_filter_result_candidate(
+                message=message,
+                summary=summary,
+                tool_call=tool_call,
+            ):
+                continue
+            candidates.append(
+                (
+                    self._historical_spatial_filter_result_score(
+                        message=message,
+                        summary=summary,
+                        tool_call=tool_call,
+                    ),
+                    -recency,
+                    dataset_id,
+                )
+            )
+            seen.add(dataset_id)
+
+        for recency, summary in enumerate(reversed(session.data_summaries)):
+            dataset_id = summary.dataset_id
+            if dataset_id in seen:
+                continue
+            if not self._is_historical_spatial_filter_result_candidate(
+                message=message,
+                summary=summary,
+                tool_call=None,
+            ):
+                continue
+            candidates.append(
+                (
+                    self._historical_spatial_filter_result_score(
+                        message=message,
+                        summary=summary,
+                        tool_call=None,
+                    ),
+                    -recency,
+                    dataset_id,
+                )
+            )
+            seen.add(dataset_id)
+
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return self._dedupe_dataset_ids([dataset_id for _, _, dataset_id in candidates])
+
+    def _is_historical_spatial_filter_result_candidate(
+        self,
+        *,
+        message: str,
+        summary: InputDataSummary | None,
+        tool_call: ToolCallRecord | None,
+    ) -> bool:
+        if summary is not None:
+            lineage = summary.lineage or (
+                self._lineage_from_tool_calls(summary.dataset_id, [tool_call])
+                if tool_call is not None
+                else None
+            )
+            if summary.source_type != "generated":
+                return False
+            if isinstance(lineage, dict) and lineage.get("operation") == "buffer":
+                return False
+            if self._is_invalid_spatial_filter_lineage(lineage):
+                return False
+            if "缓冲" in summary.name or "buffer" in summary.name.lower():
+                return False
+            if isinstance(lineage, dict) and lineage.get("operation") == "spatial_filter":
+                if "机场" in message:
+                    return "机场" in summary.name or self._has_airport_fields(summary)
+                return "空间筛选" in summary.name or "结果图层" in message
+            return "空间筛选" in summary.name and summary.geometry_type in {
+                "Point",
+                "MultiPoint",
+            }
+
+        if tool_call is None:
+            return False
+        tool_input = tool_call.input if isinstance(tool_call.input, dict) else {}
+        if self._is_invalid_spatial_filter_lineage(tool_input):
+            return False
+        input_dataset_id = str(tool_input.get("inputDatasetId") or "")
+        output_fields = [
+            str(field).lower()
+            for field in tool_input.get("outputFields", [])
+            if isinstance(field, str)
+        ]
+        return (
+            input_dataset_id == "sample_airports"
+            or (
+                "机场" in message
+                and bool({"iata_code", "gps_code", "abbrev"} & set(output_fields))
+            )
+        )
+
+    def _historical_spatial_filter_result_score(
+        self,
+        *,
+        message: str,
+        summary: InputDataSummary | None,
+        tool_call: ToolCallRecord | None,
+    ) -> float:
+        score = 0.0
+        if summary is not None:
+            if summary.source_type == "generated":
+                score += 500
+            if "空间筛选" in summary.name:
+                score += 250
+            if "机场" in message and (
+                "机场" in summary.name or self._has_airport_fields(summary)
+            ):
+                score += 250
+            if summary.geometry_type in {"Point", "MultiPoint"}:
+                score += 100
+            if (
+                isinstance(summary.lineage, dict)
+                and summary.lineage.get("operation") == "spatial_filter"
+            ):
+                score += 500
+        if tool_call is not None:
+            score += 300
+        return score
+
+    def _is_existing_spatial_filter_result_candidate(
+        self,
+        *,
+        message: str,
+        layer: dict[str, Any],
+        dataset_id: str,
+        name: str,
+        layer_id: str,
+        session: AgentSession,
+    ) -> bool:
+        summary = self._summary_for_ranking(dataset_id)
+        lineage = None if summary is None else summary.lineage
+        lineage = lineage or self._lineage_from_tool_calls(dataset_id, session.tool_calls)
+        operation = lineage.get("operation") if isinstance(lineage, dict) else None
+        geometry_type = str(layer.get("geometryType") or "").lower()
+        if not geometry_type and summary is not None:
+            geometry_type = str(summary.geometry_type or "").lower()
+
+        if operation == "buffer" or "缓冲" in name or "buffer" in name.lower():
+            return False
+        if self._is_invalid_spatial_filter_lineage(lineage):
+            return False
+        if (
+            summary is not None
+            and summary.source_type != "generated"
+            and operation != "spatial_filter"
+        ):
+            return False
+        if summary is None and not dataset_id.startswith("dataset_"):
+            return False
+        if dataset_id.lower() in message or (layer_id and layer_id.lower() in message):
+            return True
+        if name and name.lower() in message:
+            return True
+        if operation == "spatial_filter":
+            if "机场" in message and ("机场" in name or self._has_airport_fields(summary)):
+                return True
+            return "空间筛选" in name or "结果图层" in message
+        if "空间筛选" in name and geometry_type in {"point", "multipoint"}:
+            return True
+        return False
+
+    def _existing_spatial_filter_result_score(
+        self,
+        *,
+        message: str,
+        layer: dict[str, Any],
+        dataset_id: str,
+        name: str,
+        layer_id: str,
+        selected_positions: dict[str, int],
+        session: AgentSession,
+    ) -> float:
+        summary = self._summary_for_ranking(dataset_id)
+        lineage = None if summary is None else summary.lineage
+        lineage = lineage or self._lineage_from_tool_calls(dataset_id, session.tool_calls)
+        geometry_type = str(layer.get("geometryType") or "").lower()
+        if not geometry_type and summary is not None:
+            geometry_type = str(summary.geometry_type or "").lower()
+
+        score = 0.0
+        if dataset_id.lower() in message:
+            score += 10000
+        if layer_id and layer_id.lower() in message:
+            score += 9000
+        if name and name.lower() in message:
+            score += 1000
+        if bool(layer.get("visible")):
+            score += 500
+        if layer_id and layer_id not in {f"layer_{dataset_id}", f"layer_{dataset_id.lower()}"}:
+            score += 300
+        if summary is not None and summary.source_type == "generated":
+            score += 300
+        if isinstance(lineage, dict) and lineage.get("operation") == "spatial_filter":
+            score += 500
+        if "机场" in message and ("机场" in name or self._has_airport_fields(summary)):
+            score += 250
+        if "空间筛选" in name:
+            score += 200
+        if geometry_type in {"point", "multipoint"}:
+            score += 150
+        if dataset_id in selected_positions:
+            score += 50
+            score -= selected_positions[dataset_id] * 0.001
+        return score
+
+    def _is_invalid_spatial_filter_lineage(self, lineage: Any) -> bool:
+        if not isinstance(lineage, dict):
+            return False
+        if lineage.get("operation") not in {None, "spatial_filter"}:
+            return False
+        input_dataset_id = str(lineage.get("inputDatasetId") or "").strip()
+        mask_dataset_id = str(lineage.get("maskDatasetId") or "").strip()
+        if not input_dataset_id or not mask_dataset_id:
+            return False
+        return input_dataset_id == mask_dataset_id
+
+    def _has_airport_fields(self, summary: InputDataSummary | None) -> bool:
+        if summary is None:
+            return False
+        field_names = {field.name.lower() for field in summary.fields}
+        return bool({"iata_code", "gps_code", "abbrev"} & field_names)
 
     def _layer_inspection_score(
         self,

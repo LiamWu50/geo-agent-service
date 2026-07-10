@@ -40,6 +40,7 @@ class AgentSession(BaseModel):
     selected_dataset_ids: list[str] = Field(default_factory=list, alias="selectedDatasetIds")
     selected_service_ids: list[str] = Field(default_factory=list, alias="selectedServiceIds")
     data_summaries: list[InputDataSummary] = Field(default_factory=list, alias="dataSummaries")
+    plan_payloads: list[dict] = Field(default_factory=list, alias="planPayloads")
     plan: list[PlanStep] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list, alias="toolCalls")
     layers: list[MapLayerResult] = Field(default_factory=list)

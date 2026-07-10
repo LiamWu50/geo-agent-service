@@ -303,6 +303,26 @@ class AiChatIntentAndPlanMixin:
         }
 
     def _plan_message(self, plan_payload: dict[str, Any]) -> str:
+        if plan_payload.get("planType") == "points_in_polygon_plan":
+            input_point_dataset_id = str(plan_payload.get("inputPointDatasetId") or "")
+            mask_dataset_id = str(plan_payload.get("maskDatasetId") or "")
+            predicate = str(plan_payload.get("predicate") or "within")
+            output_fields = [
+                str(field)
+                for field in plan_payload.get("outputFields", [])
+                if isinstance(field, str)
+            ]
+            output_text = ""
+            if output_fields:
+                output_text = "，输出字段 " + "、".join(output_fields)
+            return (
+                "已生成执行计划，尚未调用工具："
+                f"输入点图层 {input_point_dataset_id}，"
+                f"掩膜面图层 {mask_dataset_id}，"
+                f"空间关系 {predicate}"
+                f"{output_text}；只生成计划，不执行任何工具，不生成新图层。"
+            )
+
         step_titles = [
             str(step.get("title") or step.get("id") or "")
             for step in plan_payload.get("steps", [])

@@ -24,6 +24,7 @@ class AiChatToolExecutionMixin:
         def _task_type(self, message: str) -> str: ...
         def _is_analysis_execution_request(self, message: str) -> bool: ...
         def _is_points_in_existing_buffer_plan_request(self, message: str) -> bool: ...
+        def _is_existing_result_buffer_request(self, message: str) -> bool: ...
 
     async def _run_tools(
         self,
@@ -241,6 +242,13 @@ class AiChatToolExecutionMixin:
                 and "attribute_summary" in self.tool_registry.list_names()
             ):
                 calls.append(("attribute_summary", self._attribute_summary_input(base_input)))
+            return calls
+
+        if self._is_existing_result_buffer_request(message):
+            if effective_dataset_ids and "geoprocess" in self.tool_registry.list_names():
+                calls.append(
+                    ("geoprocess", self._geoprocess_input(base_input, operation="buffer"))
+                )
             return calls
 
         if self._is_spatial_filter_request(message):
