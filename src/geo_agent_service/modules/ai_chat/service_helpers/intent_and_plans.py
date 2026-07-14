@@ -439,13 +439,19 @@ class AiChatIntentAndPlanMixin:
         commands = [
             {
                 "action": "camera.flyTo",
-                "center": center,
+                "target": {
+                    "kind": "coordinate",
+                    "lon": center[0],
+                    "lat": center[1],
+                },
+                "durationMs": 1200,
                 "datasetId": dataset_id,
                 "layerId": layer_id,
             },
             {
                 "action": "overlay.addMarker",
-                "coordinates": center,
+                "id": f"{dataset_id}-highlight",
+                "position": center,
                 "label": label,
                 "datasetId": dataset_id,
                 "layerId": layer_id,
@@ -531,6 +537,11 @@ class AiChatIntentAndPlanMixin:
         )
 
     def _is_result_layer_inspection_request(self, message: str) -> bool:
+        if self._is_plan_only_request(message) or self._has_any(
+            message,
+            ["统计", "分类", "占比", "平均", "总和", "求和", "汇总", "summary"],
+        ):
+            return False
         result_layer_terms = [
             "刚才生成",
             "刚生成",
@@ -544,6 +555,10 @@ class AiChatIntentAndPlanMixin:
             "result layer",
         ]
         inspection_terms = [
+            "说明",
+            "信息",
+            "详情",
+            "属性",
             "图层 id",
             "图层id",
             "数据集 id",

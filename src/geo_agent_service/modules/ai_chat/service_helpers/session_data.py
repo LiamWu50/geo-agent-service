@@ -28,6 +28,7 @@ class AiChatSessionDataMixin:
         def _is_map_display_request(self, message: str) -> bool: ...
         def _is_result_layer_inspection_request(self, message: str) -> bool: ...
         def _is_analysis_execution_request(self, message: str) -> bool: ...
+        def _is_attribute_summary_request(self, message: str) -> bool: ...
         def _has_any(self, text: str, needles: list[str]) -> bool: ...
 
     def _load_data_summaries(
@@ -150,6 +151,11 @@ class AiChatSessionDataMixin:
                 return self._dedupe_dataset_ids([*point_ids, *mask_ids, *mentioned_ids])
         if mentioned_ids:
             return mentioned_ids
+
+        if self._is_attribute_summary_request(payload.message.lower()):
+            layer_dataset_ids = self._layer_inspection_dataset_ids(payload, session)
+            if layer_dataset_ids:
+                return layer_dataset_ids
 
         if self._is_map_display_request(payload.message.lower()):
             layer_dataset_ids = self._layer_inspection_dataset_ids(payload, session)
