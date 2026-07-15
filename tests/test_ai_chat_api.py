@@ -2613,6 +2613,86 @@ def test_ai_chat_map_display_accepts_fly_to_layer_extent_wording(
         clear_overrides()
 
 
+def test_ai_chat_map_display_resolves_pronoun_to_unique_generated_layer(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    result_summary = write_population_spatial_filter_result(storage)
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_map_display_pronoun/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "定位到该图层",
+                "selectedDatasetIds": ["sample_airports", result_summary.dataset_id],
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "bbox": [-175.14, -53.01, 178.56, 71.29],
+                        },
+                        {
+                            "layerId": "layer_generated_result",
+                            "datasetId": result_summary.dataset_id,
+                            "name": result_summary.name,
+                            "geometryType": "Point",
+                            "bbox": [104.0680736, 30.6719459, 104.0680736, 30.6719459],
+                        },
+                    ],
+                    "activeDatasetIds": ["sample_airports", result_summary.dataset_id],
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "map.command",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "camera.flyTo",
+            "target": {
+                "kind": "coordinate",
+                "lon": 104.0680736,
+                "lat": 30.6719459,
+            },
+            "durationMs": 1200,
+            "datasetId": result_summary.dataset_id,
+            "layerId": "layer_generated_result",
+        }
+    finally:
+        clear_overrides()
+
+
 def test_ai_chat_map_display_recovers_explicit_registered_dataset_not_in_layer_context(
     tmp_path: Path,
 ) -> None:

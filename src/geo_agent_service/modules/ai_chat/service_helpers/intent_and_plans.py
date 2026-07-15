@@ -490,6 +490,14 @@ class AiChatIntentAndPlanMixin:
         if not isinstance(layers, list):
             return None
 
+        referenced_result_layer = self._referenced_result_layer(
+            payload,
+            session,
+            layers,
+        )
+        if referenced_result_layer is not None:
+            return referenced_result_layer
+
         target_dataset_ids = self._layer_inspection_dataset_ids(payload, session)
         if target_dataset_ids:
             target_dataset_id = target_dataset_ids[0]
@@ -514,6 +522,43 @@ class AiChatIntentAndPlanMixin:
             if dataset_id and dataset_id in message:
                 return layer
         return self._registered_layer_for_explicit_dataset_id(message)
+
+    def _referenced_result_layer(
+        self,
+        payload: ChatMessageRequest,
+        session: AgentSession,
+        layers: list[Any],
+    ) -> dict[str, Any] | None:
+        message = payload.message.lower()
+        if not self._has_any(
+            message,
+            ["该图层", "这个图层", "此图层", "刚才的图层", "刚生成的图层"],
+        ):
+            return None
+
+        layers_by_dataset_id = {
+            str(layer.get("datasetId") or ""): layer
+            for layer in layers
+            if isinstance(layer, dict) and str(layer.get("datasetId") or "")
+        }
+        for tool_call in reversed(session.tool_calls):
+            output = tool_call.output
+            if not isinstance(output, dict):
+                continue
+            dataset_id = str(output.get("resultDatasetId") or "").strip()
+            layer = layers_by_dataset_id.get(dataset_id)
+            if layer is not None:
+                return layer
+
+        generated_layers = [
+            layer
+            for dataset_id, layer in layers_by_dataset_id.items()
+            if (
+                (summary := self._summary_for_ranking(dataset_id)) is not None
+                and summary.source_type == "generated"
+            )
+        ]
+        return generated_layers[0] if len(generated_layers) == 1 else None
 
     def _registered_layer_for_explicit_dataset_id(
         self,
