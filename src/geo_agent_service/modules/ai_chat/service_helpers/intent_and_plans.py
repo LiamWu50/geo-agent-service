@@ -12,6 +12,7 @@ from geo_agent_service.schemas.session import AgentSession
 class AiChatIntentAndPlanMixin:
     if TYPE_CHECKING:
         def _has_any(self, text: str, needles: list[str]) -> bool: ...
+        def _is_style_request(self, message: str) -> bool: ...
         def _is_attribute_summary_request(self, message: str) -> bool: ...
         def _is_spatial_filter_request(self, message: str) -> bool: ...
         def _infer_distance(self, message: str) -> tuple[float, str] | None: ...
@@ -29,6 +30,8 @@ class AiChatIntentAndPlanMixin:
         ) -> dict[str, Any] | None: ...
 
     def _task_type(self, message: str) -> str:
+        if self._is_style_request(message):
+            return "layer_style"
         if self._is_map_display_request(message):
             return "map_display"
         if (
@@ -429,38 +432,49 @@ class AiChatIntentAndPlanMixin:
         if target is None:
             return None
 
+        bbox = self._bbox_for_layer(target)
         center = self._center_for_layer(target)
-        if center is None:
+        if bbox is None and center is None:
             return None
 
         dataset_id = str(target.get("datasetId") or "")
         layer_id = str(target.get("layerId") or target.get("id") or "")
         label = self._marker_label_for_layer(target)
+        target_payload: dict[str, Any]
+        if bbox is not None:
+            target_payload = {"kind": "bbox", "bbox": bbox}
+        else:
+            assert center is not None
+            target_payload = {
+                "kind": "coordinate",
+                "lon": center[0],
+                "lat": center[1],
+            }
         commands = [
             {
                 "action": "camera.flyTo",
-                "target": {
-                    "kind": "coordinate",
-                    "lon": center[0],
-                    "lat": center[1],
-                },
+                "target": target_payload,
                 "durationMs": 1200,
                 "datasetId": dataset_id,
                 "layerId": layer_id,
-            },
-            {
-                "action": "overlay.addMarker",
-                "id": f"{dataset_id}-highlight",
-                "position": center,
-                "label": label,
-                "datasetId": dataset_id,
-                "layerId": layer_id,
-            },
+            }
         ]
+        if center is not None and self._has_any(message, ["高亮", "highlight"]):
+            commands.append(
+                {
+                    "action": "overlay.addMarker",
+                    "id": f"{dataset_id}-highlight",
+                    "position": center,
+                    "label": label,
+                    "datasetId": dataset_id,
+                    "layerId": layer_id,
+                }
+            )
         return {
             "datasetId": dataset_id,
             "layerId": layer_id,
             "label": label,
+            "bbox": bbox,
             "center": center,
             "commands": commands,
         }
@@ -515,6 +529,18 @@ class AiChatIntentAndPlanMixin:
                 return None
         return None
 
+    def _bbox_for_layer(self, layer: dict[str, Any]) -> list[float] | None:
+        bbox = layer.get("bbox")
+        if not isinstance(bbox, list | tuple) or len(bbox) != 4:
+            return None
+        try:
+            min_lon, min_lat, max_lon, max_lat = [float(value) for value in bbox]
+        except (TypeError, ValueError):
+            return None
+        if min_lon >= max_lon or min_lat >= max_lat:
+            return None
+        return [min_lon, min_lat, max_lon, max_lat]
+
     def _marker_label_for_layer(self, layer: dict[str, Any]) -> str:
         dataset_id = str(layer.get("datasetId") or "")
         name = str(layer.get("name") or "")
@@ -528,12 +554,17 @@ class AiChatIntentAndPlanMixin:
             for command in payload.get("commands", [])
             if isinstance(command, dict)
         ]
+        target_description = (
+            f"bbox={payload.get('bbox')}"
+            if payload.get("bbox") is not None
+            else f"center={payload.get('center')}"
+        )
         return (
             "已执行地图展示动作："
             + "、".join(actions)
             + f"；目标图层={payload.get('layerId')}；"
             + f"datasetId={payload.get('datasetId')}；"
-            + f"center={payload.get('center')}。"
+            + f"{target_description}。"
         )
 
     def _is_result_layer_inspection_request(self, message: str) -> bool:
@@ -588,37 +619,25 @@ class AiChatIntentAndPlanMixin:
             "定位",
             "高亮",
             "飞到",
+            "飞行到",
+            "飞往",
             "缩放到",
-            "显示已有",
-            "展示已有",
-            "地图展示",
-            "地图显示",
+            "缩放至",
+            "查看范围",
+            "显示范围",
+            "展示范围",
             "map display",
             "map interaction",
             "fly to",
             "highlight",
         ]
-        layer_terms = ["图层", "结果图层", "dataset_", "layer_"]
+        layer_terms = ["图层", "结果图层", "数据集", "dataset_", "layer_"]
         if not self._has_any(message, display_terms):
             return False
         if not self._has_any(message, layer_terms):
             return False
-        return self._has_any(
-            message,
-            [
-                "只执行地图展示",
-                "只做地图展示",
-                "不重新执行",
-                "不要重新执行",
-                "不执行任何数据分析",
-                "不要执行任何数据分析",
-                "不调用",
-                "不要调用",
-                "已有结果图层",
-                "显示已有结果图层",
-                "结果图层",
-            ],
-        )
+        # 明确展示图层范围的请求无需再附带“不调用分析”等限定语。
+        return True
 
     def _is_analysis_execution_request(self, message: str) -> bool:
         if (

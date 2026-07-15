@@ -2550,6 +2550,76 @@ def test_ai_chat_map_display_existing_population_result_does_not_run_analysis(
         clear_overrides()
 
 
+def test_ai_chat_map_display_accepts_fly_to_layer_extent_wording(
+    tmp_path: Path,
+) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_map_display_sichuan/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "飞行到四川省这个图层范围",
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_sichuan",
+                            "datasetId": "dataset_sichuan",
+                            "name": "四川省",
+                            "geometryType": "MultiPolygon",
+                            "bbox": [97.35, 26.05, 108.55, 34.32],
+                        }
+                    ],
+                    "clientCapabilities": {
+                        "mapCommands": ["camera.flyTo", "overlay.addMarker"]
+                    },
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "map.command",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "camera.flyTo",
+            "target": {"kind": "bbox", "bbox": [97.35, 26.05, 108.55, 34.32]},
+            "durationMs": 1200,
+            "datasetId": "dataset_sichuan",
+            "layerId": "layer_sichuan",
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_map_display_without_command_uses_fallback_message(
+    tmp_path: Path,
+) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_map_display_missing_target/messages",
+            headers=auth_headers(token),
+            json={"message": "飞行到四川省这个图层范围", "metadata": {"layers": []}},
+        )
+
+        assert response.status_code == 200
+        assert event_payloads(response.text, "map.command") == []
+        completed_message = event_payloads(response.text, "message.completed")[0]["data"][
+            "message"
+        ]["content"]
+        assert completed_message == "我未生成地图指令，无法执行定位。"
+    finally:
+        clear_overrides()
+
+
 def test_ai_chat_result_layer_inspection_is_read_only_and_uses_lineage(
     tmp_path: Path,
 ) -> None:
@@ -3698,6 +3768,268 @@ def test_ai_chat_geoprocess_attribute_filter_creates_filtered_dataset(tmp_path: 
         features = preview_response.json()["data"]["features"]
         assert len(features) == 1
         assert features[0]["properties"]["type"] == "school"
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_updates_point_style_without_running_tools(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_style_point/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把 schools 图层改成半透明红色，点大小设为 12",
+                "selectedDatasetIds": ["dataset_schools"],
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_schools",
+                            "datasetId": "dataset_schools",
+                            "name": "schools",
+                            "geometryType": "Point",
+                            "editable": {"style": True},
+                        }
+                    ],
+                    "clientCapabilities": {"mapCommands": ["layer.updateStyle"]},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "map.command",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "tool.started") == []
+        assert event_payloads(response.text, "layer.created") == []
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "layer.updateStyle",
+            "layerId": "layer_schools",
+            "style": {
+                "point": {"color": "rgba(255, 0, 0, 0.5)", "pixelSize": 12}
+            },
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_updates_line_and_polygon_style_contracts(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        base_metadata = {
+            "clientCapabilities": {"mapCommands": ["layer.updateStyle"]},
+        }
+        line_response = client.post(
+            "/api/ai-chat/sessions/session_style_line/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把港口线改成蓝色，线宽到 4",
+                "metadata": {
+                    **base_metadata,
+                    "layers": [
+                        {
+                            "layerId": "layer_ports",
+                            "datasetId": "sample_ports",
+                            "name": "港口线",
+                            "geometryType": "LineString",
+                            "editable": {"style": True},
+                        }
+                    ],
+                },
+            },
+        )
+        polygon_response = client.post(
+            "/api/ai-chat/sessions/session_style_polygon/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把人口区填充为橙色",
+                "metadata": {
+                    **base_metadata,
+                    "layers": [
+                        {
+                            "layerId": "layer_population",
+                            "datasetId": "dataset_population",
+                            "name": "人口区",
+                            "geometryType": "Polygon",
+                            "editable": {"style": True},
+                        }
+                    ],
+                },
+            },
+        )
+
+        assert event_payloads(line_response.text, "map.command")[0]["data"]["style"] == {
+            "line": {"color": "#0000FF", "width": 4}
+        }
+        assert event_payloads(polygon_response.text, "map.command")[0]["data"]["style"] == {
+            "polygon": {"fillColor": "#FFA500"}
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_beautifies_named_polygon_layer_without_running_tools(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_style_beautify/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "四川省这个图层换一个好看点的样式",
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "editable": {"style": True},
+                        },
+                        {
+                            "layerId": "layer_to_Z_GF51SOUbjjU",
+                            "datasetId": "dataset_f2838ae521d6",
+                            "name": "四川省",
+                            "geometryType": "MultiPolygon",
+                            "editable": {"style": True},
+                        },
+                    ],
+                    "clientCapabilities": {"mapCommands": ["layer.updateStyle"]},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_payloads(response.text, "tool.started") == []
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "layer.updateStyle",
+            "layerId": "layer_to_Z_GF51SOUbjjU",
+            "style": {
+                "polygon": {
+                    "fillColor": "#E6F2FF",
+                    "outlineColor": "#0047AB",
+                    "outlineWidth": 2,
+                }
+            },
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_style_ambiguity_and_missing_capability_do_not_send_commands(
+    tmp_path: Path,
+) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        ambiguous_response = client.post(
+            "/api/ai-chat/sessions/session_style_ambiguous/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把机场图层改成红色",
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_airports_a",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "editable": {"style": True},
+                        },
+                        {
+                            "layerId": "layer_airports_b",
+                            "datasetId": "dataset_airports_copy",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "editable": {"style": True},
+                        },
+                    ],
+                    "clientCapabilities": {"mapCommands": ["layer.updateStyle"]},
+                },
+            },
+        )
+        unsupported_response = client.post(
+            "/api/ai-chat/sessions/session_style_no_capability/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把当前图层改成红色",
+                "metadata": {
+                    "activeLayerId": "layer_airports",
+                    "layers": [
+                        {
+                            "layerId": "layer_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "editable": {"style": True},
+                        }
+                    ],
+                    "clientCapabilities": {"mapCommands": []},
+                },
+            },
+        )
+
+        assert event_payloads(ambiguous_response.text, "map.command") == []
+        clarification = event_payloads(ambiguous_response.text, "clarification")[0]["data"]
+        assert clarification["reason"] == "ambiguous_target"
+        assert len(clarification["candidates"]) == 2
+        assert event_payloads(unsupported_response.text, "map.command") == []
+        assert event_payloads(unsupported_response.text, "clarification") == []
+        completed = event_payloads(unsupported_response.text, "message.completed")[0]["data"]
+        assert "layer.updateStyle" in completed["message"]["content"]
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_emits_style_before_map_display_commands(tmp_path: Path) -> None:
+    configure_app(tmp_path)
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_style_display/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "把 schools 图层改成红色后定位并高亮显示",
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_schools",
+                            "datasetId": "dataset_schools",
+                            "name": "schools",
+                            "geometryType": "Point",
+                            "bbox": [116.1, 39.7, 116.3, 39.9],
+                            "editable": {"style": True},
+                        }
+                    ],
+                    "clientCapabilities": {
+                        "mapCommands": [
+                            "layer.updateStyle",
+                            "camera.flyTo",
+                            "overlay.addMarker",
+                        ]
+                    },
+                },
+            },
+        )
+
+        commands = [event["data"] for event in event_payloads(response.text, "map.command")]
+        assert [command["action"] for command in commands] == [
+            "layer.updateStyle",
+            "camera.flyTo",
+            "overlay.addMarker",
+        ]
+        assert commands[0]["style"] == {"point": {"color": "#FF0000"}}
+        assert event_payloads(response.text, "tool.started") == []
     finally:
         clear_overrides()
 

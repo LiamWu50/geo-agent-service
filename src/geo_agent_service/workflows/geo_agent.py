@@ -64,6 +64,7 @@ class GeoAgentState(BaseModel):
     tool_plan: ToolPlan | None = None
     layer_context: list[dict[str, Any]] = Field(default_factory=list)
     map_context: dict[str, Any] = Field(default_factory=dict)
+    style_plan: dict[str, Any] | None = None
     plan: list[PlanStep] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     tool_results: list[ToolCallRecord] = Field(default_factory=list)

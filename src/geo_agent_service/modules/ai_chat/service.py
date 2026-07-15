@@ -15,6 +15,7 @@ from geo_agent_service.modules.ai_chat.service_helpers import (
     AiChatIntentAndPlanMixin,
     AiChatMessagingMixin,
     AiChatSessionDataMixin,
+    AiChatStylePlanningMixin,
     AiChatToolExecutionMixin,
 )
 from geo_agent_service.modules.gis_data.repository import DatasetRepository
@@ -35,6 +36,7 @@ class AiChatService(
     AiChatIntentAndPlanMixin,
     AiChatToolExecutionMixin,
     AiChatMessagingMixin,
+    AiChatStylePlanningMixin,
 ):
     def __init__(
         self,
@@ -202,17 +204,21 @@ class AiChatService(
             return state
         payload = self._require_payload(state)
         message = payload.message.lower()
+        style_plan = self._style_command_plan(payload)
         map_display_payload = self._map_display_payload(
             self._require_session(state),
             payload,
         )
         state.intent = IntentResult(
-            task_type=self._task_type(message),
+            task_type="layer_style" if style_plan is not None else self._task_type(message),
             requires_plan_only=self._is_plan_only_request(payload.message),
             requires_map_display=bool(map_display_payload),
-            requires_tool_execution=not self._user_forbids_tools(message),
+            requires_tool_execution=(
+                style_plan is None and not self._user_forbids_tools(message)
+            ),
             requires_confirmation=False,
         )
+        state.style_plan = style_plan
         return state
 
     async def _data_readiness_node(self, state: GeoAgentState) -> GeoAgentState:
@@ -295,7 +301,10 @@ class AiChatService(
     async def _tool_execution_node(self, state: GeoAgentState) -> GeoAgentState:
         if state.is_done:
             return state
-        if state.tool_plan is not None and not state.tool_plan.execute:
+        if (
+            (state.tool_plan is not None and not state.tool_plan.execute)
+            or state.style_plan is not None
+        ):
             return state
         async for event in self._run_tools(
             self._require_session(state),
@@ -313,8 +322,69 @@ class AiChatService(
         payload = self._require_payload(state)
         session = self._require_session(state)
         assistant_message = self._require_assistant_message(state)
+        style_plan = state.style_plan
+        if style_plan is not None:
+            outcome = str(style_plan["outcome"])
+            if outcome == "clarification":
+                state.stream_events.append(
+                    StreamEvent(
+                        type="clarification",
+                        sessionId=session.id,
+                        messageId=assistant_message.id,
+                        data=style_plan["clarification"],
+                    )
+                )
+                return self._finalize_text_response_node(
+                    state, str(style_plan["message"])
+                )
+            if outcome == "unsupported":
+                return self._finalize_text_response_node(
+                    state, str(style_plan["message"])
+                )
+
+            for command in style_plan["commands"]:
+                state.map_commands.append(
+                    {
+                        **command,
+                        "datasetId": str(style_plan["datasetId"]),
+                        "reason": str(style_plan["reason"]),
+                    }
+                )
+                state.stream_events.append(
+                    StreamEvent(
+                        type="map.command",
+                        sessionId=session.id,
+                        messageId=assistant_message.id,
+                        data=command,
+                    )
+                )
+            style_message = str(style_plan["message"])
+            state.assistant_chunks.append(style_message)
+            state.stream_events.append(
+                StreamEvent(
+                    type="message.delta",
+                    sessionId=session.id,
+                    messageId=assistant_message.id,
+                    data={"delta": style_message},
+                )
+            )
         map_display_payload = self._map_display_payload(session, payload)
         if not map_display_payload:
+            if style_plan is not None:
+                state.stream_events.append(
+                    self._finalize_assistant_message(
+                        user_id=state.user_id,
+                        session=session,
+                        assistant_message=assistant_message,
+                        chunks=state.assistant_chunks,
+                    )
+                )
+                state.is_done = True
+            elif self._is_map_display_request(payload.message.lower()):
+                return self._finalize_text_response_node(
+                    state,
+                    "我未生成地图指令，无法执行定位。",
+                )
             return state
 
         commands = map_display_payload["commands"]

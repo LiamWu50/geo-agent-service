@@ -7,6 +7,9 @@ from geo_agent_service.modules.ai_chat.service_helpers.messaging import (
 from geo_agent_service.modules.ai_chat.service_helpers.session_data import (
     AiChatSessionDataMixin,
 )
+from geo_agent_service.modules.ai_chat.service_helpers.style_planning import (
+    AiChatStylePlanningMixin,
+)
 from geo_agent_service.modules.ai_chat.service_helpers.tool_execution import (
     AiChatToolExecutionMixin,
 )
@@ -15,5 +18,6 @@ __all__ = [
     "AiChatIntentAndPlanMixin",
     "AiChatMessagingMixin",
     "AiChatSessionDataMixin",
+    "AiChatStylePlanningMixin",
     "AiChatToolExecutionMixin",
 ]
