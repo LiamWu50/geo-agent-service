@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 from geo_agent_service.modules.ai_chat.schemas import ChatMessageRequest, StreamEvent
 from geo_agent_service.schemas.agent import AgentError, ToolCallRecord
 from geo_agent_service.schemas.session import AgentSession
+from geo_agent_service.tools.base import GisToolResult
 
 if TYPE_CHECKING:
     from geo_agent_service.tools.registry import GisToolRegistry
@@ -23,8 +24,10 @@ class AiChatToolExecutionMixin:
         def _duration_ms(self, started_at: datetime, finished_at: datetime) -> int: ...
         def _task_type(self, message: str) -> str: ...
         def _is_analysis_execution_request(self, message: str) -> bool: ...
+        def _is_attribute_filter_execution_request(self, message: str) -> bool: ...
         def _is_points_in_existing_buffer_plan_request(self, message: str) -> bool: ...
         def _is_existing_result_buffer_request(self, message: str) -> bool: ...
+        def _user_forbids_tools(self, message: str) -> bool: ...
 
     async def _run_tools(
         self,
@@ -127,7 +130,7 @@ class AiChatToolExecutionMixin:
                     "durationMs": tool_call.duration_ms,
                 },
             )
-            result_layer = result.layer
+            result_layer = self._result_layer(tool_name, result, tool_call.output)
             can_emit_result_layer = self._can_emit_result_layer(
                 tool_name,
                 tool_call.output,
@@ -140,13 +143,80 @@ class AiChatToolExecutionMixin:
                     toolCallId=tool_call.id,
                     data=result_layer or {},
                 )
-            if can_emit_result_layer and result.map_command:
+            map_command = self._result_map_command(tool_name, result, result_layer)
+            if can_emit_result_layer and map_command:
                 yield StreamEvent(
                     type="map.command",
                     sessionId=session.id,
                     toolCallId=tool_call.id,
-                    data=result.map_command,
+                    data=map_command,
                 )
+
+    def _result_layer(
+        self,
+        tool_name: str,
+        result: GisToolResult,
+        output: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if tool_name != "geoprocess":
+            return dict(result.layer) if result.layer else None
+
+        summary = result.summary if isinstance(result.summary, dict) else {}
+        generated_dataset = summary.get("result")
+        generated_dataset = (
+            generated_dataset if isinstance(generated_dataset, dict) else {}
+        )
+        result_dataset_id = str(
+            output.get("resultDatasetId")
+            or generated_dataset.get("datasetId")
+            or ""
+        ).strip()
+        result_name = str(generated_dataset.get("name") or "").strip()
+        if not result_dataset_id or not result_name:
+            return None
+
+        layer = dict(result.layer or {})
+        existing_metadata = layer.get("metadata")
+        layer.update(
+            {
+                "id": str(layer.get("id") or f"layer_{result_dataset_id}"),
+                "datasetId": result_dataset_id,
+                "name": result_name,
+                "geometryType": generated_dataset.get("geometryType"),
+                "dataRef": generated_dataset.get("dataRef"),
+                "bbox": generated_dataset.get("bbox"),
+                "source": {
+                    "type": "dataset",
+                    "datasetId": result_dataset_id,
+                },
+                "metadata": {
+                    **(existing_metadata if isinstance(existing_metadata, dict) else {}),
+                    "sourceDatasetId": summary.get("sourceDatasetId"),
+                    "operation": summary.get("operation"),
+                },
+            }
+        )
+        return layer
+
+    def _result_map_command(
+        self,
+        tool_name: str,
+        result: GisToolResult,
+        layer: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if tool_name != "geoprocess":
+            return dict(result.map_command) if result.map_command else None
+        if not layer:
+            return None
+
+        # A generated geoprocess dataset must be immediately materialized by the client.
+        return {
+            "action": "layer.addDataset",
+            "datasetId": layer["datasetId"],
+            "name": layer["name"],
+            "visible": True,
+            "flyTo": True,
+        }
 
     def _tool_output(self, tool_name: str, result: Any) -> dict[str, Any]:
         output = cast(dict[str, Any], result.model_dump(mode="json", by_alias=True))
@@ -283,21 +353,7 @@ class AiChatToolExecutionMixin:
                 calls.append(
                     ("geoprocess", self._geoprocess_input(base_input, operation="bbox_clip"))
                 )
-        elif self._has_any(
-            message,
-            [
-                "筛选",
-                "过滤",
-                "filter",
-                "等于",
-                "不等于",
-                "大于",
-                "小于",
-                "超过",
-                "低于",
-                "包含",
-            ],
-        ):
+        elif self._is_attribute_filter_execution_request(message):
             if effective_dataset_ids and "geoprocess" in self.tool_registry.list_names():
                 calls.append(
                     (
@@ -408,6 +464,14 @@ class AiChatToolExecutionMixin:
                 if isinstance(map_view, dict) and "bbox" in map_view:
                     payload["bbox"] = map_view["bbox"]
         elif operation == "attribute_filter":
+            input_dataset_id = self._infer_attribute_filter_dataset(
+                str(base_input.get("message") or ""),
+                base_input.get("dataSummaries") or [],
+                dataset_ids,
+            )
+            if input_dataset_id:
+                payload["inputDatasetId"] = input_dataset_id
+                payload["datasetId"] = input_dataset_id
             field = self._infer_filter_field(
                 str(base_input.get("message") or ""),
                 base_input.get("dataSummaries") or [],
@@ -415,6 +479,40 @@ class AiChatToolExecutionMixin:
             if field:
                 payload["field"] = field
         return payload
+
+    def _infer_attribute_filter_dataset(
+        self,
+        message: str,
+        summaries: list[Any],
+        dataset_ids: list[str],
+    ) -> str | None:
+        normalized = message.lower()
+        candidates: list[tuple[int, int, str]] = []
+        for index, dataset_id in enumerate(dataset_ids):
+            summary = next(
+                (
+                    item
+                    for item in summaries
+                    if isinstance(item, dict)
+                    and str(item.get("datasetId") or "") == dataset_id
+                ),
+                None,
+            )
+            if not isinstance(summary, dict):
+                continue
+            name = str(summary.get("name") or "").strip().lower()
+            score = 0
+            if dataset_id.lower() in normalized:
+                score += 10_000
+            if name and name in normalized:
+                score += 1_000
+            if score:
+                candidates.append((score, -index, dataset_id))
+
+        if not candidates:
+            return dataset_ids[0] if dataset_ids else None
+        candidates.sort(reverse=True)
+        return candidates[0][2]
 
     def _distance_to_meters(self, distance: float, unit: str) -> float:
         normalized = unit.lower()
@@ -622,6 +720,16 @@ class AiChatToolExecutionMixin:
                     name = str(field.get("name") or "")
                     if name:
                         fields.append(name)
+        aliases = {
+            "名称": "name",
+            "名字": "name",
+        }
+        for alias, canonical_name in aliases.items():
+            if alias not in normalized:
+                continue
+            for field in fields:
+                if field.lower() == canonical_name:
+                    return field
         for name in sorted(fields, key=len, reverse=True):
             if name.lower() in normalized:
                 return name

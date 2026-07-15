@@ -156,6 +156,32 @@ async def test_geoprocess_attribute_filter_by_equal_value(tmp_path: Path) -> Non
     ]
 
 
+async def test_geoprocess_attribute_filter_accepts_unique_chinese_place_prefix(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+    dataset_id = register_source(
+        service,
+        gpd.GeoDataFrame(
+            {"name": ["德阳市", "成都市"]},
+            geometry=[Point(104.4, 31.1), Point(104.1, 30.7)],
+            crs="EPSG:4326",
+        ),
+    )
+
+    result = await GeoprocessTool(service).run(
+        {
+            "operation": "attribute_filter",
+            "datasetId": dataset_id,
+            "field": "name",
+            "operator": "eq",
+            "value": "德阳",
+        }
+    )
+
+    assert result.summary["featureCount"] == 1
+
+
 async def test_geoprocess_attribute_filter_by_numeric_comparison(tmp_path: Path) -> None:
     service = make_service(tmp_path)
     dataset_id = register_source(

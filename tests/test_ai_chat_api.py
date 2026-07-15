@@ -293,6 +293,22 @@ def write_sichuan_polygon_dataset(storage: GisDataStorage) -> InputDataSummary:
     return summary
 
 
+def write_sichuan_city_dataset(storage: GisDataStorage) -> InputDataSummary:
+    service = GisDatasetService(
+        storage=storage,
+        repository=DatasetRepository(storage.metadata_path()),
+    )
+    return service.register_generated_dataset(
+        name="四川省",
+        geodata=gpd.GeoDataFrame(
+            {"name": ["德阳市", "成都市"]},
+            geometry=[Point(104.4, 31.1), Point(104.1, 30.7)],
+            crs="EPSG:4326",
+        ),
+        source_tool_call_id="test_setup",
+    )
+
+
 def write_crs_dataset(storage: GisDataStorage) -> InputDataSummary:
     repository = DatasetRepository(storage.metadata_path())
     service = GisDatasetService(storage=storage, repository=repository)
@@ -2229,7 +2245,7 @@ def test_ai_chat_spatial_filter_emits_completed_audit_and_result_layer(
         assert "iata_code=CTU" in completed_message
         assert "type=major" in completed_message
         assert "spatial_filter 尚未实现/未执行" not in completed_message
-        assert "16" not in completed_message
+        assert "featureCount=16" not in completed_message
         assert "status=success" not in completed_message
         assert model_client.tool_results == []
     finally:
@@ -2592,6 +2608,85 @@ def test_ai_chat_map_display_accepts_fly_to_layer_extent_wording(
             "durationMs": 1200,
             "datasetId": "dataset_sichuan",
             "layerId": "layer_sichuan",
+        }
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_map_display_recovers_explicit_registered_dataset_not_in_layer_context(
+    tmp_path: Path,
+) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    result_summary = write_population_spatial_filter_result(
+        storage,
+        dataset_id="dataset_explicit_result",
+    )
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_map_display_explicit_dataset/messages",
+            headers=auth_headers(token),
+            json={
+                "message": f"定位到{result_summary.dataset_id}图层",
+                "selectedDatasetIds": ["sample_airports"],
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                            "geometryType": "Point",
+                            "bbox": [-175.14, -53.01, 178.56, 71.29],
+                        }
+                    ],
+                    "activeDatasetIds": ["sample_airports"],
+                    "clientCapabilities": {"mapCommands": ["camera.flyTo"]},
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text) == [
+            "data.summary",
+            "map.command",
+            "message.delta",
+            "message.completed",
+        ]
+        assert event_payloads(response.text, "tool.started") == []
+        assert event_payloads(response.text, "layer.created") == []
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "camera.flyTo",
+            "target": {
+                "kind": "coordinate",
+                "lon": 104.0680736,
+                "lat": 30.6719459,
+            },
+            "durationMs": 1200,
+            "datasetId": result_summary.dataset_id,
+            "layerId": f"layer_{result_summary.dataset_id}",
         }
     finally:
         clear_overrides()
@@ -3738,7 +3833,7 @@ def test_ai_chat_geoprocess_attribute_filter_creates_filtered_dataset(tmp_path: 
             "/api/ai-chat/sessions/session_filter/messages",
             headers=auth_headers(token),
             json={
-                "message": "筛选 type 等于 school 的要素并显示",
+                "message": "schools 图层里面名称为 A School 的要素帮我单独提取出来创建为一个图层",
                 "selectedDatasetIds": [source_summary.dataset_id],
             },
         )
@@ -3754,9 +3849,32 @@ def test_ai_chat_geoprocess_attribute_filter_creates_filtered_dataset(tmp_path: 
             "message.delta",
             "message.completed",
         ]
-        assert '"operation": "attribute_filter"' in response.text
-        assert '"field": "type"' in response.text
-        assert '"value": "school"' in response.text
+        completed = event_payloads(response.text, "tool.completed")[0]["data"]
+        output = completed["output"]
+        assert completed["toolName"] == "geoprocess"
+        assert completed["status"] == "completed"
+        assert output["summary"]["operation"] == "attribute_filter"
+        assert output["summary"]["filter"] == {
+            "field": "name",
+            "operator": "eq",
+            "value": "A School",
+        }
+
+        layer = event_payloads(response.text, "layer.created")[0]["data"]
+        assert layer["datasetId"] == output["resultDatasetId"]
+        assert layer["name"] == output["summary"]["result"]["name"]
+        assert layer["metadata"] == {
+            "sourceDatasetId": source_summary.dataset_id,
+            "operation": "attribute_filter",
+        }
+
+        assert event_payloads(response.text, "map.command")[0]["data"] == {
+            "action": "layer.addDataset",
+            "datasetId": output["resultDatasetId"],
+            "name": layer["name"],
+            "visible": True,
+            "flyTo": True,
+        }
 
         session = client.get(
             "/api/ai-chat/sessions/session_filter",
@@ -3767,7 +3885,90 @@ def test_ai_chat_geoprocess_attribute_filter_creates_filtered_dataset(tmp_path: 
         assert preview_response.status_code == 200
         features = preview_response.json()["data"]["features"]
         assert len(features) == 1
-        assert features[0]["properties"]["type"] == "school"
+        assert features[0]["properties"]["name"] == "A School"
+    finally:
+        clear_overrides()
+
+
+def test_ai_chat_attribute_filter_uses_named_layer_as_input_dataset(tmp_path: Path) -> None:
+    settings.auth_storage_root = str(tmp_path / "auth")
+    settings.gis_storage_root = str(tmp_path / "gis")
+    settings.ai_chat_storage_root = str(tmp_path / "ai-chat")
+    settings.auth_username = "admin"
+    settings.auth_password = "secret"
+    settings.auth_token_secret = "test-secret"
+    settings.auth_token_expire_minutes = 60
+    storage = GisDataStorage(settings.gis_storage_root)
+    sichuan_summary = write_sichuan_city_dataset(storage)
+
+    def fake_service() -> AiChatService:
+        dataset_repository = DatasetRepository(storage.metadata_path())
+        return AiChatService(
+            repository=AiChatRepository(settings.ai_chat_storage_root),
+            dataset_repository=dataset_repository,
+            dataset_service=GisDatasetService(storage=storage, repository=dataset_repository),
+            tool_registry=create_default_tool_registry(
+                dataset_repository=dataset_repository,
+                storage=storage,
+            ),
+            model_client=FakeModelClient(),
+        )
+
+    app.dependency_overrides[get_ai_chat_service] = fake_service
+    try:
+        client = TestClient(app)
+        token = login(client)
+        response = client.post(
+            "/api/ai-chat/sessions/session_sichuan_attribute_filter/messages",
+            headers=auth_headers(token),
+            json={
+                "message": "四川省这个图层里面的名称为德阳的要素帮我单独提取出来创建为一个图层",
+                "selectedDatasetIds": [
+                    "sample_airports",
+                    "sample_ports",
+                    "sample_populated_places",
+                    sichuan_summary.dataset_id,
+                ],
+                "metadata": {
+                    "layers": [
+                        {
+                            "layerId": "layer_sample_airports",
+                            "datasetId": "sample_airports",
+                            "name": "机场",
+                        },
+                        {
+                            "layerId": "layer_sichuan",
+                            "datasetId": sichuan_summary.dataset_id,
+                            "name": "四川省",
+                        },
+                    ]
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert event_names(response.text)[:5] == [
+            "data.summary",
+            "tool.started",
+            "tool.completed",
+            "layer.created",
+            "map.command",
+        ]
+        started = event_payloads(response.text, "tool.started")[0]["data"]
+        assert started["toolName"] == "geoprocess"
+        assert started["input"]["operation"] == "attribute_filter"
+        assert started["input"]["inputDatasetId"] == sichuan_summary.dataset_id
+        assert started["input"]["field"] == "name"
+
+        completed = event_payloads(response.text, "tool.completed")[0]["data"]
+        output = completed["output"]
+        assert output["summary"]["sourceDatasetId"] == sichuan_summary.dataset_id
+        assert output["featureCount"] == 1
+        layer = event_payloads(response.text, "layer.created")[0]["data"]
+        assert layer["name"] == "四川省 属性筛选"
+        assert event_payloads(response.text, "map.command")[0]["data"]["datasetId"] == output[
+            "resultDatasetId"
+        ]
     finally:
         clear_overrides()
 

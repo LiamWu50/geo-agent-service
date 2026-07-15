@@ -241,9 +241,24 @@ class GeoprocessTool(GisTool):
                 mask = numeric_series <= numeric_value
         else:
             comparable_value = self._coerce_filter_value(value, series)
+            if operator == "eq" and isinstance(comparable_value, str):
+                comparable_value = self._unique_prefixed_string_value(
+                    comparable_value,
+                    series,
+                )
             mask = series != comparable_value if operator == "ne" else series == comparable_value
 
         return geodata.loc[mask].copy().reset_index(drop=True)
+
+    def _unique_prefixed_string_value(self, value: str, series: Any) -> str:
+        if bool(series.astype(str).eq(value).any()):
+            return value
+        matches = [
+            candidate
+            for candidate in series.dropna().astype(str).unique()
+            if candidate.startswith(value)
+        ]
+        return matches[0] if len(matches) == 1 else value
 
     def _filter_spec(
         self,
@@ -331,7 +346,10 @@ class GeoprocessTool(GisTool):
             return payload["values"]
 
         message = str(payload.get("message") or "")
-        escaped_field = re.escape(field)
+        field_terms = [re.escape(field)]
+        if field.lower() == "name":
+            field_terms.extend(["名称", "名字"])
+        escaped_field = "(?:" + "|".join(field_terms) + ")"
         patterns = [
             rf"{escaped_field}\s*(?:==|=|!=|<>|>=|<=|>|<)\s*['\"]?(.+?)(?:['\"]?\s*(?:的?要素|并|，|,|。|$))",
             rf"{escaped_field}.*?(?:等于|为|是|包含|含有|大于等于|小于等于|大于|小于|超过|低于|不等于|不是|不小于|不大于)\s*['\"]?(.+?)(?:['\"]?\s*(?:的?要素|并|，|,|。|$))",

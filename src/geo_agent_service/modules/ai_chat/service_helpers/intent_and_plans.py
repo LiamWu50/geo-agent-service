@@ -41,6 +41,8 @@ class AiChatIntentAndPlanMixin:
             return "result_layer_inspection"
         if self._is_attribute_summary_request(message):
             return "attribute_summary"
+        if self._is_attribute_filter_execution_request(message):
+            return "spatial_analysis"
         if self._is_analysis_execution_request(message):
             return "spatial_analysis"
         if re.search(
@@ -511,6 +513,30 @@ class AiChatIntentAndPlanMixin:
                 return layer
             if dataset_id and dataset_id in message:
                 return layer
+        return self._registered_layer_for_explicit_dataset_id(message)
+
+    def _registered_layer_for_explicit_dataset_id(
+        self,
+        message: str,
+    ) -> dict[str, Any] | None:
+        for match in re.finditer(
+            r"(?<![a-z0-9_-])(dataset_[a-z0-9_-]+)(?![a-z0-9_-])",
+            message,
+            flags=re.IGNORECASE,
+        ):
+            dataset_id = match.group(0)
+            summary = self._summary_for_ranking(dataset_id)
+            if summary is None:
+                continue
+            return {
+                "id": f"layer_{summary.dataset_id}",
+                "layerId": f"layer_{summary.dataset_id}",
+                "datasetId": summary.dataset_id,
+                "name": summary.name,
+                "geometryType": summary.geometry_type,
+                "bbox": summary.bbox,
+                "dataRef": summary.data_ref,
+            }
         return None
 
     def _center_for_layer(self, layer: dict[str, Any]) -> list[float] | None:
@@ -647,6 +673,8 @@ class AiChatIntentAndPlanMixin:
             return False
         if self._user_forbids_tools(message):
             return False
+        if self._is_attribute_filter_execution_request(message):
+            return True
         strong_execution_terms = [
             "执行",
             "运行",
@@ -678,6 +706,28 @@ class AiChatIntentAndPlanMixin:
         return self._has_any(message, create_terms) and self._has_any(
             message,
             deterministic_operation_terms,
+        )
+
+    def _is_attribute_filter_execution_request(self, message: str) -> bool:
+        if self._user_forbids_tools(message):
+            return False
+        extraction_terms = ["筛选", "过滤", "filter", "提取", "抽取"]
+        condition_terms = [
+            "等于",
+            "不等于",
+            "大于",
+            "小于",
+            "包含",
+            "名称为",
+            "名称是",
+            "name =",
+            "name=",
+        ]
+        result_terms = ["创建", "生成", "单独", "图层", "要素"]
+        return (
+            self._has_any(message, extraction_terms)
+            and self._has_any(message, condition_terms)
+            and self._has_any(message, result_terms)
         )
 
     def _has_positive_execution_request(self, message: str) -> bool:
